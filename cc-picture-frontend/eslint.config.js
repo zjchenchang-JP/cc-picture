@@ -5,7 +5,7 @@ import prettier from "eslint-plugin-prettier";
 
 export default [
   {
-    files: ["**/*.{js,mjs,cjs,ts,vue}"],
+    files: ["**/*.{js,mjs,cjs,ts}"],
     languageOptions: {
       parser: typescriptEslint,
       parserOptions: {
@@ -35,9 +35,6 @@ export default [
         parser: typescriptEslint,
         ecmaVersion: "latest",
         sourceType: "module",
-        ecmaFeatures: {
-          jsx: true,
-        },
       },
     },
   },
