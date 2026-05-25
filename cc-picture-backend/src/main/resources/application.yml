@@ -5,12 +5,18 @@ server:
 spring:
   application:
     name: yu-picture-backend
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
   # 数据库配置
   datasource:
-    url: jdbc:mysql://localhost:3306/yupi?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://localhost:3306/cc_picture?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
     driver-class-name: com.mysql.cj.jdbc.Driver
     username: root
     password: 123456
+knife4j:
+  enable: true
+  production: false
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: false # 关闭 [MP查询数据库时 将驼峰命名自动转换为下划线]
