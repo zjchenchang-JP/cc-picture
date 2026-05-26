@@ -1,4 +1,4 @@
-package com.zjcc.ccpicturebackend.common;
+package com.zjcc.ccpicturebackend.constant;
 
 /**
  * 通用 常量
