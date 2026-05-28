@@ -195,7 +195,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
      * @param userPassword 原始密码
      * @return 密文密码
      */
-    private String getEncryptPassword(String userPassword) {
+    public String getEncryptPassword(String userPassword) {
         return DigestUtils.md5DigestAsHex((StaticConst.SALT + userPassword).getBytes());
     }
 

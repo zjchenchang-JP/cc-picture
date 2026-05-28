@@ -11,13 +11,14 @@ import javax.servlet.http.HttpServletRequest;
 import java.util.List;
 
 /**
-* @author 86187
-* @description 针对表【user(用户)】的数据库操作Service
-* @createDate 2026-05-25 22:04:29
-*/
+ * @author 86187
+ * @description 针对表【user(用户)】的数据库操作Service
+ * @createDate 2026-05-25 22:04:29
+ */
 public interface UserService extends IService<User> {
     /**
      * 用户注册
+     *
      * @param userAccount   用户账户
      * @param userPassword  用户密码
      * @param checkPassword 校验密码
@@ -27,21 +28,24 @@ public interface UserService extends IService<User> {
 
     /**
      * 用户登录
+     *
      * @param userAccount  用户账户
      * @param userPassword 用户密码
-     * @param request httpRequest 请求方便设置 cookie
+     * @param request      httpRequest 请求方便设置 cookie
      * @return 脱敏后的用户信息
      */
     LoginUserVO userLogin(String userAccount, String userPassword, HttpServletRequest request);
 
     /**
      * 获取脱敏的已登录用户信息
+     *
      * @return 脱敏的已登录用户信息
      */
     LoginUserVO getLoginUserVO(User user);
 
     /**
      * 获取当前登录用户
+     *
      * @param request request
      * @return 当前登录用户
      */
@@ -49,6 +53,7 @@ public interface UserService extends IService<User> {
 
     /**
      * 用户注销
+     *
      * @param request
      * @return
      */
@@ -78,5 +83,10 @@ public interface UserService extends IService<User> {
      */
     QueryWrapper<User> getQueryWrapper(UserQueryRequest userQueryRequest);
 
-
+    /**
+     * 密码加密
+     * @param userPassword 原始密码
+     * @return 密文密码
+     */
+    String getEncryptPassword(String userPassword);
 }

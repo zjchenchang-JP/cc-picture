@@ -7,6 +7,11 @@ public interface UserConstant {
      */
     String USER_LOGIN_STATE = "user_login";
 
+    /**
+     * 管理员创建的 新用户 默认密码
+     */
+    String DEFAULT_PASSWORD = "123456";
+
     //  region 权限
     /**
      * 默认角色

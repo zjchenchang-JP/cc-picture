@@ -53,7 +53,7 @@ public class AuthInterceptor {
         User loginUser = userService.getLoginUser(request);
         UserRoleEnum mustRoleEnum = UserRoleEnum.getEnumByValue(mustRole);
         if (null == mustRoleEnum) {
-            // 无需角色校验 直接放行（但必须登录）
+            // 无需角色校验 直接放行
             joinPoint.proceed();
         }
         // 必须有权限
