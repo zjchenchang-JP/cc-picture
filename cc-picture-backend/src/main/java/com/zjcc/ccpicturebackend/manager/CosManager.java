@@ -1,6 +1,8 @@
 package com.zjcc.ccpicturebackend.manager;
 
 import com.qcloud.cos.COSClient;
+import com.qcloud.cos.model.COSObject;
+import com.qcloud.cos.model.GetObjectRequest;
 import com.qcloud.cos.model.PutObjectRequest;
 import com.qcloud.cos.model.PutObjectResult;
 import com.qcloud.cos.model.ciModel.persistence.PicOperations;
@@ -10,7 +12,7 @@ import java.io.File;
 import javax.annotation.Resource;
 
 /**
- * 通用的、可复用的能力，可供其他代码（比如Service）调用
+ * 通用的 COS 对象存储操作类 ，可供其他代码（比如Service）调用
  */
 @Component
 public class CosManager {  
@@ -32,6 +34,17 @@ public class CosManager {
                 file);
         return cosClient.putObject(putObjectRequest);
     }
+
+    /**
+     * 下载对象
+     *
+     * @param key 唯一键
+     */
+    public COSObject getObject(String key) {
+        GetObjectRequest getObjectRequest = new GetObjectRequest(cosClientConfig.getBucket(), key);
+        return cosClient.getObject(getObjectRequest);
+    }
+
 
     /**
      * 上传对象（附带图片信息）
