@@ -8,6 +8,11 @@ spring:
   mvc:
     pathmatch:
       matching-strategy: ant_path_matcher
+    # 开放更大的文件上传体积
+  servlet:
+    multipart:
+      max-file-size: 10MB # 单个文件最大大小 默认 1MB; 抛出 MaxUploadSizeExceededException
+      # max-request-size # 整个请求最大大小 默认10MB
   # profiles:
   #  active: local
   # 数据库配置
