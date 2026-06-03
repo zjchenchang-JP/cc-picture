@@ -107,7 +107,12 @@ public class PictureVO implements Serializable {
         }  
         Picture picture = new Picture();  
         BeanUtils.copyProperties(pictureVO, picture);
-        // 类型不同，需要转换  
+        // 类型不同，需要转换
+        // ObjectMapper objectMapper = new ObjectMapper();
+        // picture.setTags(objectMapper.writeValueAsString(pictureVO.getTags()));
+
+        // Fastjson（阿里巴巴）
+        // picture.setTags(JSON.toJSONString(pictureVO.getTags()));
         picture.setTags(JSONUtil.toJsonStr(pictureVO.getTags()));
         return picture;  
     }  
@@ -121,7 +126,18 @@ public class PictureVO implements Serializable {
         }  
         PictureVO pictureVO = new PictureVO();  
         BeanUtils.copyProperties(picture, pictureVO);  
-        // 类型不同，需要转换  
+        // 类型不同，需要转换
+        // 不用hutool工具的 其他转换方法
+        // 1.Jackson（Spring Boot 自带，无需额外依赖）
+        // ObjectMapper objectMapper = new ObjectMapper();
+        // List<String> tags = objectMapper.readValue(picture.getTags(), new TypeReference<List<String>>() {});
+
+        // 2.Gson（Google 出品）
+        // Gson gson = new Gson();
+        // List<String> tags = gson.fromJson(picture.getTags(), new TypeToken<List<String>>() {}.getType());
+
+        // 3.Fastjson（阿里巴巴）
+        // List<String> tags = JSON.parseArray(picture.getTags(), String.class);
         pictureVO.setTags(JSONUtil.toList(picture.getTags(), String.class));  
         return pictureVO;  
     }  

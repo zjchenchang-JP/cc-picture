@@ -191,12 +191,16 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
 
     /**
      * 密码加密
-     *
      * @param userPassword 原始密码
      * @return 密文密码
      */
     public String getEncryptPassword(String userPassword) {
         return DigestUtils.md5DigestAsHex((StaticConst.SALT + userPassword).getBytes());
+    }
+
+    @Override
+    public boolean isAdmin(User user) {
+        return user != null && UserRoleEnum.ADMIN.getValue().equals(user.getUserRole());
     }
 
 }

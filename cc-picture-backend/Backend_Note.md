@@ -385,3 +385,841 @@ public static String uploadToCOS(MultipartFile multipartFile, String bucketName,
 }
 
 ```
+---
+# 2026/06/03
+## `getPictureVOById` 和 `getPictureById` 这两个方法是否有必要拆分。
+
+```java
+// 根据 id 获取图片（封装类）- 所有可用
+@GetMapping("/get/vo")
+public BaseResponse<PictureVO> getPictureVOById(long id, HttpServletRequest request) {
+    ThrowUtils.throwIf(id <= 0, ErrorCode.PARAMS_ERROR);
+    Picture picture = pictureService.getById(id);
+    ThrowUtils.throwIf(picture == null, ErrorCode.NOT_FOUND_ERROR);
+    return ResultUtils.success(pictureService.getPictureVO(picture, request));
+}
+
+// 根据 id 获取图片（仅管理员可用）
+@GetMapping("/get")
+@AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+public BaseResponse<Picture> getPictureById(long id, HttpServletRequest request) {
+    ThrowUtils.throwIf(id <= 0, ErrorCode.PARAMS_ERROR);
+    Picture picture = pictureService.getById(id);
+    ThrowUtils.throwIf(picture == null, ErrorCode.NOT_FOUND_ERROR);
+    return ResultUtils.success(picture);
+}
+```
+1. PictureVO 比 Picture 信息更丰富，为什么管理员反而要用信息更少的 Picture？
+2. 两个方法是否有必要拆分？
+
+关键点：
+- **Picture** 是实体类，包含数据库所有字段（包括一些敏感信息如 userId）
+- **PictureVO** 是视图类，是对外展示的，可能过滤了一些敏感字段
+
+但实际上管理员需要看到 Picture 实体类的原因：
+1. **管理需求**：管理员可能需要看到原始的数据库字段，比如 userId、创建时间、编辑时间等
+2. **调试排查**：管理员排查问题时需要看到完整的原始数据
+3. **编辑操作**：管理员编辑图片时需要获取完整的实体信息
+
+而普通只需要看到 PictureVO（脱敏/简化后的信息）。
+
+所以拆分是有必要的，但理由不是因为 PictureVO 比 Picture 信息多，而是因为：
+- **权限控制不同**：普通 vs 管理员
+- **返回数据不同**：VO 是给前端的，实体是给管理后台的
+- **用途不同**：展示 vs 管理
+
+## 两个方法的区别
+
+| | `getPictureVOById` | `getPictureById` |
+|---|---|---|
+| **权限** | 所有 | 仅管理员 |
+| **返回类型** | `PictureVO`（视图类） | `Picture`（实体类） |
+| **用途** | 前台展示 | 后台管理/编辑 |
+
+## 为什么管理员需要 Picture 实体类？
+
+虽然 PictureVO 信息看起来更丰富（多了 user 用户信息），但 **Picture 实体类有管理端需要的原始字段**：
+
+```java
+// Picture 实体类有，PictureVO 可能没有的字段：
+private Long userId;        // 上传者ID（编辑时需要回显）
+private Date editTime;      // 编辑时间（管理端需要展示）
+private String tags;        // JSON 字符串（原始格式，编辑时需要）
+// ... 其他管理端专用字段
+```
+
+**举个例子：**
+- **普通**访问图片详情 → `getPictureVOById` → 看到展示页面，tags 已经解析成 `List<String>`
+- **管理员**编辑图片 → `getPictureById` → 拿到原始数据回填到编辑表单
+
+## 简单说
+
+```
+前台看图片 → 用 VO（展示，脱敏，格式化好）
+后台管理员管图片 → 用实体（编辑，原始数据完整）
+```
+**拆分的核心是权限和数据用途不同，不是信息量的多少。**不同，不是信息量的多少。**
+```markdown
+getPictureVOById → 所有可访问（前台展示）
+getPictureById   → 仅管理员可访问（后台管理）
+```
+
+---
+## @TableField(typeHandler = JacksonTypeHandler.class)  注解
+这是 MyBatis-Plus 的注解，用于处理 Java 对象与数据库字段之间的类型转换。
+让 MyBatis-Plus 在**读写数据库时自动进行 JSON 转换**。
+### 工作流程
+
+```
+Java 侧:  List<String> tags = ["风景", "自然", "山水"]
+    ↓  写入数据库（自动序列化）
+数据库侧:  tags = '["风景","自然","山水"]'
+    ↓ 读取数据库（自动反序列化）
+Java 侧:  List<String> tags = ["风景", "自然", "山水"]
+```
+
+### 对比：加与不加的区别
+
+| 场景 | 不加 typeHandler | 加了 typeHandler |
+|------|----------------|----------------|
+| **实体类字段类型** | `String`（必须手动存 JSON 字符串） | `List<String>`（直接 Java 类型） |
+| **写入数据库** | 需要手动 `JSONUtil.toJsonStr(tags)` | **自动**序列化为 JSON |
+| **读取数据库** | 需要手动 `JSONUtil.toList(tags, String.class)` | **自动**反序列化为 List |
+| **objToVo / voToObj** | 需要手动转换 tags 类型 | 不需要，类型一致 |
+
+### 代码对比
+
+**不加 typeHandler（当前写法）：**
+```java
+// Picture 实体
+private String tags;  // String 类型
+
+// 写入时手动转
+picture.setTags(JSONUtil.toJsonStr(pictureUpdateRequest.getTags()));
+
+// 读取时手动转
+pictureVO.setTags(JSONUtil.toList(picture.getTags(), String.class));
+```
+
+**加了 typeHandler：**
+```java
+// Picture 实体
+@TableField(typeHandler = JacksonTypeHandler.class)
+private List<String> tags;  // 直接 List 类型
+
+// 写入时直接
+picture.setTags(pictureUpdateRequest.getTags());  // 自动转 JSON
+
+// 读取时直接
+pictureVO.setTags(picture.getTags());  // 自动转 List
+// 甚至不需要 objToVo 中手动转换了
+```
+**一个注解，省去所有手动 JSON 转换的代码。** MyBatis-Plus 帮你自动处理 Java 对象和 JSON 字符串之间的互转。串之间的互转。
+
+---
+
+## 其他相关注解
+### 1. EnumTypeHandler（存枚举名称字符串）
+
+**不使用 typeHandler（手动处理）：**
+```java
+// 实体类字段必须是 String
+private String picFormat;
+
+// 写入时手动转换
+picture.setPicFormat(PictureFormat.JPEG.name());  // 手动调用 name()
+
+// 读取时手动转换
+PictureFormat format = PictureFormat.valueOf(picture.getPicFormat());  // 手动解析
+```
+
+**使用 EnumTypeHandler（自动处理）：**
+```java
+// 实体类
+@TableField(typeHandler = EnumTypeHandler.class)
+private PictureFormat picFormat;
+
+// 写入时直接赋值
+picture.setPicFormat(PictureFormat.JPEG);  // 自动存为 "JPEG"
+
+// 读取时直接使用
+PictureFormat format = picture.getPicFormat();  // 自动转为枚举
+```
+
+```
+数据库中：     "JPEG"（字符串）
+```
+
+---
+
+### 2. EnumOrdinalTypeHandler（存枚举序号）
+
+**不使用 typeHandler（手动处理）：**
+```java
+// 实体类字段必须是 int
+private Integer picFormat;
+
+// 写入时手动转换
+picture.setPicFormat(PictureFormat.JPEG.ordinal());  // 手动调用 ordinal()
+
+// 读取时手动转换
+PictureFormat format = PictureFormat.values()[picture.getPicFormat()];  // 手动解析
+```
+
+**使用 EnumOrdinalTypeHandler（自动处理）：**
+```java
+// 实体类
+@TableField(typeHandler = EnumOrdinalTypeHandler.class)
+private PictureFormat picFormat;
+
+// 写入时直接赋值
+picture.setPicFormat(PictureFormat.JPEG);  // 自动存为 0
+
+// 读取时直接使用
+PictureFormat format = picture.getPicFormat();  // 自动转为枚举
+```
+
+```
+数据库中：    0（整数）
+```
+
+**两者对比：**
+
+```
+枚举定义：    JPEG(0), JPG(1), PNG(2), WEBP(3)
+
+EnumTypeHandler       → 数据库存 "JPEG"    （可读，安全）
+EnumOrdinalTypeHandler → 数据库存 0         （不可读，枚举顺序变了数据就错）
+```
+
+---
+
+### 3. DateTypeHandler
+
+**不使用 typeHandler（MyBatis 自动处理，通常不需要手动指定）：**
+```java
+// 实体类（无需注解，自动映射）
+private Date createTime;
+
+// 数据库字段类型：datetime
+// MyBatis 自动完成 Date ↔ datetime 的转换
+```
+
+**需要自定义格式时（数据库存的是字符串格式的日期）：**
+
+不使用 typeHandler（手动处理）：
+```java
+// 实体类字段必须是 String 
+//  varchar，存的值是 "2026-06-03 14:30:00"
+private String createTime;
+
+// 写入时手动格式化
+picture.setCreateTime(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date()));
+
+// 读取时手动解析
+Date date = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse(picture.getCreateTime());
+```
+
+使用自定义 typeHandler（自动处理）：
+```java
+@TableField(typeHandler = DateStringTypeHandler.class)
+private Date createTime;
+
+// 写入时直接赋值
+picture.setCreateTime(new Date());  // 自动转为 "2026-06-03 14:30:00"
+
+// 读取时直接使用
+Date time = picture.getCreateTime();  // 自动转为 Date
+```
+
+```
+数据库中：     "2026-06-03 14:30:00"（字符串）
+```
+
+---
+
+### 总结
+
+| TypeHandler | 不用时 Java 字段 | 使用后 Java 字段 | 数据库存储 | 省去的手动操作 |
+|-------------|----------------|----------------|-----------|--------------|
+| `EnumTypeHandler` | `String` | `PictureFormat`（枚举） | `"JPEG"` | `.name()` / `valueOf()` |
+| `EnumOrdinalTypeHandler` | `Integer` | `PictureFormat`（枚举） | `0` | `.ordinal()` / `values()[n]` |
+| 自定义 `DateStringTypeHandler` | `String` | `Date` | `"2026-06-03 14:30:00"` | `SimpleDateFormat` 格式化/解析 |
+
+**核心：不用时字段必须是基础类型 + 手动转换，用了之后字段直接目标类型 + 自动转换。****
+
+---
+## 
+```java
+/**
+     * 获取预置标签和分类
+     * @return 预设的固定数据
+     */
+    @GetMapping("/tag_category")
+    public BaseResponse<PictureTagCategory> listPictureTagCategory() {
+        // 要支持用户根据标签和分类搜索图片，我们可以给用户列举一些常用的标签和分类，便于筛选
+        // 在项目规模不大的时候，我们没必要将标签和分类单独用数据表来维护了
+        // 前期直接在 PictureController 中写一个接口，返回预设的固定数据即可
+        // TODO
+        // 随着系统规模和数据不断扩大，可以再改为使用配置中心或数据库动态管理这些数据，或者通过定时任务计算出热门的图片分类和标签
+        PictureTagCategory pictureTagCategory = new PictureTagCategory();
+        List<String> tagList = Arrays.asList("热门", "搞笑", "生活", "高清", "艺术", "校园", "背景", "简历", "创意");
+        List<String> categoryList = Arrays.asList("模板", "电商", "表情包", "素材", "海报");
+        pictureTagCategory.setTagList(tagList);
+        pictureTagCategory.setCategoryList(categoryList);
+        return ResultUtils.success(pictureTagCategory);
+    }
+```
+注释提到的三种扩展方案的示例代码：
+1. 配置中心动态管理
+2. 数据库动态管理
+3. 定时任务计算热门标签/分类
+
+---
+
+## 方案1：配置中心动态管理（以 Nacos 为例）
+
+```yaml
+# Nacos 配置中心中的配置
+picture:
+  tag-category:
+    tag-list: "热门,搞笑,生活,高清,艺术,校园,背景,简历,创意"
+    category-list: "模板,电商,表情包,素材,海报"
+```
+
+```java
+@RestController
+@RequestMapping("/picture")
+@RefreshScope  // Nacos 配置变更时自动刷新
+public class PictureController {
+
+    @Value("${picture.tag-category.tag-list}")
+    private String tagListStr;
+
+    @Value("${picture.tag-category.category-list}")
+    private String categoryListStr;
+
+    @GetMapping("/tag_category")
+    public BaseResponse<PictureTagCategory> listPictureTagCategory() {
+        PictureTagCategory pictureTagCategory = new PictureTagCategory();
+        pictureTagCategory.setTagList(Arrays.asList(tagListStr.split(",")));
+        pictureTagCategory.setCategoryList(Arrays.asList(categoryListStr.split(",")));
+        return ResultUtils.success(pictureTagCategory);
+    }
+```
+
+**优点**：不用重启服务，在 Nacos 控制台改配置即可生效。
+
+---
+
+## 方案2：数据库动态管理
+
+```sql
+-- 建表
+CREATE TABLE picture_tag_category (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    type VARCHAR(20) NOT NULL COMMENT '类型：tag/category',
+    value VARCHAR(100) NOT NULL COMMENT '标签或分类的值',
+    sort_order INT DEFAULT 0 COMMENT '排序'
+);
+```
+
+```java
+// 实体类
+@Data
+@TableName(value = "picture_tag_category")
+public class PictureTagCategoryEntity {
+    @TableId(type = IdType.ASSIGN_ID)
+    private Long id;
+    private String type;    // "tag" 或 "category"
+    private String value;
+    private Integer sortOrder;
+}
+
+// Mapper
+public interface PictureTagCategoryMapper extends BaseMapper<PictureTagCategoryEntity> {}
+
+// Controller
+@GetMapping("/tag_category")
+public BaseResponse<PictureTagCategory> listPictureTagCategory() {
+    // 查询所有标签
+    List<String> tagList = pictureTagCategoryMapper.selectList(
+            new QueryWrapper<PictureTagCategoryEntity>().eq("type", "tag").orderByAsc("sort_order")
+    ).stream().map(PictureTagCategoryEntity::getValue).collect(Collectors.toList());
+
+    // 查询所有分类
+    List<String> categoryList = pictureTagCategoryMapper.selectList(
+            new QueryWrapper<PictureTagCategoryEntity>().eq("type", "category").orderByAsc("sort_order")
+    ).stream().map(PictureTagCategoryEntity::getValue).collect(Collectors.toList());
+
+    PictureTagCategory pictureTagCategory = new PictureTagCategory();
+    pictureTagCategory.setTagList(tagList);
+    pictureTagCategory.setCategoryList(categoryList);
+    return ResultUtils.success(pictureTagCategory);
+}
+```
+
+**优点**：管理员可以通过后台界面增删改标签和分类。
+
+---
+
+## 方案3：定时任务计算热门标签/分类
+
+```java
+@Component
+@Slf4j
+public class HotTagCategoryTask {
+
+    @Resource
+    private PictureMapper pictureMapper;
+
+    @Resource
+    private RedisTemplate<String, Object> redisTemplate;
+
+    /**
+     * 每天凌晨2点统计热门标签和分类
+     */
+    @Scheduled(cron = "0 0 2 * ?")
+    public void calculateHotTagsAndCategories() {
+        log.info("开始统计热门标签和分类");
+
+        // 1. 统计最近30天内每个标签的使用次数
+        // 假设 tags 存的是 JSON 数组， SQL 模糊统计
+        // 这里简化处理，实际项目中可能需要更复杂的统计逻辑
+
+        // 查询最近30天的图片数据
+        List<Picture> recentPictures = pictureMapper.selectList(
+                new QueryWrapper<Picture>()
+                        .ge("createTime", LocalDate.now().minusDays(30))
+                        .select("tags", "category")
+        );
+
+        // 2. 统计标签出现频率
+        Map<String, Integer> tagCountMap = new HashMap<>();
+        for (Picture picture : recentPictures) {
+            if (StrUtil.isNotBlank(picture.getTags())) {
+                List<String> tags = JSONUtil.toList(picture.getTags(), String.class);
+                tags.forEach(tag -> tagCountMap.merge(tag, 1, Integer::sum));
+            }
+        }
+
+        // 3. 统计分类出现频率
+        Map<String, Integer> categoryCountMap = new HashMap<>();
+        for (Picture picture : recentPictures) {
+            if (StrUtil.isNotBlank(picture.getCategory())) {
+                categoryCountMap.merge(picture.getCategory(), 1, Integer::sum);
+            }
+        }
+
+        // 4. 按使用次数降序排序，取前10个
+        List<String> hotTagList = tagCountMap.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(10)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+
+        List<String> hotCategoryList = categoryCountMap.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(10)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+
+        // 5. 缓存到 Redis
+        redisTemplate.opsForValue().set("hot:tags", hotTagList, 1, TimeUnit.DAYS);
+        redisTemplate.opsForValue().set("hot:categories", hotCategoryList, 1, TimeUnit.DAYS);
+
+        log.info("热门标签统计完成：{}", hotTagList);
+        log.info("热门分类统计完成：{}", hotCategoryList);
+    }
+```
+
+```java
+// Controller 中读取 Redis 缓存
+@GetMapping("/tag_category")
+public BaseResponse<PictureTagCategory> listPictureTagCategory() {
+    PictureTagCategory pictureTagCategory = new PictureTagCategory();
+    // 从 Redis 读取热门标签和分类
+    List<String> hotTagList = (List<String>) redisTemplate.opsForValue().get("hot:tags");
+    List<String> hotCategoryList = (List<String>) redisTemplate.opsForValue().get("hot:categories");
+    pictureTagCategory.setTagList(hotTagList != null ? hotTagList : Collections.emptyList());
+    pictureTagCategory.setCategoryList(hotCategoryList != null ? hotCategoryList : Collections.emptyList());
+    return ResultUtils.success(pictureTagCategory);
+}
+```
+
+**优点**：根据实际使用情况动态展示热门标签，自动更新。
+
+---
+
+## 三种方案对比
+
+| 方案 | 适用阶段 | 修改方式 | 实时性 | 复杂度 |
+|------|---------|---------|--------|--------|
+| **硬编码**（当前） | 项目初期 | 改代码重新部署 | 无 | 最低 |
+| **配置中心** | 中期 | Nacos 控制台改配置 | 准实时 | 低 |
+| **数据库** | 中期 | 后台管理界面增删改 | 实时 | 中 |
+| **定时任务** | 后期 | 自动统计，无需人工 | 每天更新 | 高 |
+
+随着系统规模扩大，可以逐步演进：**硬编码 → 配置中心 → 数据库 → 定时任务**，甚至组合使用。时任务**，甚至组合使用。
+
+## 集群部署 定时任务需要分布式锁
+如果服务部署了多个实例（集群），多个实例会同时执行同一个定时任务，导致：
+- 重复计算
+- 重复写入 Redis
+- 浪费资源
+
+**单机部署不需要，集群部署必须加。**
+
+### 不加分布式锁的问题
+
+```
+实例1: 凌晨2点触发定时任务 → 查数据库 → 写Redis
+实例2: 凌晨2点触发定时任务 → 查数据库 → 写Redis  ← 重复执行
+实例3: 凌晨2点触发定时任务 → 查数据库 → 写Redis  ← 重复执行
+```
+### 加了分布式锁后
+```
+实例1: 凌晨2点获取锁成功 → 执行任务 → 释放锁
+实例2: 凌晨2点获取锁失败 → 跳过
+实例3: 凌晨2点获取锁失败 → 跳过
+```
+
+### 常分布式锁实现
+
+| 方案 | 适用场景 | 复杂度 |
+|------|---------|--------|
+| **Redis Redisson** | 最常用，Spring Boot 项目首选 | 低 |
+| **Redis SETNX** | 轻量级 | 低 |
+| **Zookeeper** | 强一致性要求高 | 高 |
+| **数据库锁** | 不想引入新中间件 | 中 |
+
+### 以 Redisson 为例的代码
+
+```java
+@Component
+@Slf4j
+public class HotTagCategoryTask {
+
+    @Resource
+    private PictureMapper pictureMapper;
+
+    @Resource
+    private RedisTemplate<String, Object> redisTemplate;
+
+    @Resource
+    private RedissonClient redissonClient;
+
+    /**
+     * 每天凌晨2点统计热门标签和分类
+     */
+    @Scheduled(cron = "0 0 2 * ?")
+    public void calculateHotTagsAndCategories() {
+        // 获取分布式锁，锁的key要唯一，等待时间0（获取不到立即放弃），过期时间1小时（防止死锁）
+        RLock lock = redissonClient.getLock("hot:tag:category:lock");
+        try {
+            boolean tryLock = lock.tryLock(0, 360, TimeUnit.SECONDS);
+            if (!tryLock) {
+                log.info("未获取到分布式锁，跳过本次执行");
+                return;
+            }
+            // 执行统计逻辑...
+            log.info("获取分布式锁成功，开始统计热门标签和分类");
+
+            // 查询最近30天的图片数据
+            List<Picture> recentPictures = pictureMapper.selectList(
+                    new QueryWrapper<Picture>()
+                            .ge("createTime", LocalDate.now().minusDays(30))
+                            .select("tags", "category")
+            );
+
+            // 统计标签出现频率
+            Map<String, Integer> tagCountMap = new HashMap<>();
+            for (Picture picture : recentPictures) {
+                if (StrUtil.isNotBlank(picture.getTags())) {
+                    List<String> tags = JSONUtil.toList(picture.getTags(), String.class);
+                    tags.forEach(tag -> tagCountMap.merge(tag, 1, Integer::sum));
+                }
+            }
+
+            // 统计分类出现频率
+            Map<String, Integer> categoryCountMap = new HashMap<>();
+            for (Picture picture : recentPictures) {
+                if (StrUtil.isNotBlank(picture.getCategory())) {
+                    categoryCountMap.merge(picture.getCategory(), 1, Integer::sum);
+                }
+            }
+
+            // 按频率降序排序，取前10个
+            List<String> hotTagList = tagCountMap.entrySet().stream()
+                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                    .limit(10)
+                    .map(Map.Entry::getKey)
+                    .collect(Collectors.toList());
+
+            List<String> hotCategoryList = categoryCountMap.entrySet().stream()
+                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                    .limit(10)
+                    .map(Map.Entry::getKey)
+                    .collect(Collectors.toList());
+
+            // 缓存到 Redis
+            redisTemplate.opsForValue().set("hot:tags", hotTagList, 1, TimeUnit.DAYS);
+            redisTemplate.opsForValue().set("hot:categories", hotCategoryList, 1, TimeUnit.DAYS);
+
+            log.info("热门标签统计完成：{}", hotTagList);
+            log.info("热门分类统计完成：{}", hotCategoryList);
+        } catch (InterruptedException e) {
+            log.error("获取分布式锁异常", e);
+        } finally {
+            // 释放锁（只有锁的持有者才能释放）
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
+    }
+```
+
+### 简单说
+
+| 场景 | 是否需要分布式锁 |
+|------|----------------|
+| 单机部署 | 不需要 |
+| 集群部署（多实例） | **必须加** |
+
+**核心逻辑：多个实例抢同一把锁，抢到的执行，抢不到的跳过。**的跳过。**
+
+# 其他分布式锁实现实例
+
+## 方案1：Zookeeper 分布式锁
+
+```java
+@Component
+@Slf4j
+public class HotTagCategoryTask {
+
+    @Resource
+    private PictureMapper pictureMapper;
+
+    @Resource
+    private RedisTemplate<String, Object> redisTemplate;
+
+    @Resource
+    private CuratorFramework curatorFramework;
+
+    /**
+     * 每天凌晨2点统计热门标签和分类
+     */
+    @Scheduled(cron = "0 0 2 * ?")
+    public void calculateHotTagsAndCategories() {
+        // 创建 Zookeeper 分布式锁（节点路径要唯一）
+        InterProcessMutex lock = new InterProcessMutex(curatorFramework, "/lock/hot-tag-category");
+        try {
+            // 尝试获取锁，等待时间3秒，过期时间1小时
+            boolean acquired = lock.acquire(3, TimeUnit.SECONDS);
+            if (!acquired) {
+                log.info("未获取到Zookeeper分布式锁，跳过本次执行");
+                return;
+            }
+            log.info("获取Zookeeper分布式锁成功，开始统计热门标签和分类");
+
+            // 执行统计逻辑...
+            doCalculate();
+
+        } catch (Exception e) {
+            log.error("热门标签统计异常", e);
+        } finally {
+            try {
+                // 释放锁
+                if (lock.isAcquiredInThisProcess()) {
+                    lock.release();
+                }
+            } catch (Exception e) {
+                log.error("释放Zookeeper锁异常", e);
+            }
+        }
+    }
+
+    private void doCalculate() {
+        // 统计逻辑（同之前）
+    }
+```
+
+**配置类：**
+```java
+@Configuration
+public class ZookeeperConfig {
+
+    @Value("${zookeeper.connect-string}")
+    private String connectString;
+
+    @Bean
+    public CuratorFramework curatorFramework() {
+        CuratorFramework client = CuratorFrameworkFactory.builder()
+                .connectString(connectString)          // 如 "localhost:2181"
+                .sessionTimeoutMs(500)                 // 会话超时5秒
+                .connectionTimeoutMs(300)               // 连接超时3秒
+                .retryPolicy(new ExponentialBackoffRetry(100, 3))  // 重试策略
+                .build();
+        client.start();
+        return client;
+    }
+```
+
+**application.yml：**
+```yaml
+zookeeper:
+  connect-string: localhost:2181
+```
+
+---
+
+## 方案2：数据库锁
+
+### 方式一：唯一索引（推荐简单场景）
+
+**建表：**
+```sql
+CREATE TABLE distributed_lock (
+    lock_key VARCHAR(100) PRIMARY KEY COMMENT '锁标识',
+    lock_holder VARCHAR(100) COMMENT '持有者（实例标识）',
+    expire_time BIGINT COMMENT '过期时间戳',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+```
+
+**获取锁和释放锁：**
+```java
+@Component
+@Slf4j
+public class DatabaseLockManager {
+
+    @Resource
+    private JdbcTemplate jdbcTemplate;
+
+    /**
+     * 尝试获取锁
+     */
+    public boolean tryLock(String lockKey, String holder, long expireSeconds) {
+        long now = System.currentTimeMillis();
+        long expireTime = now + expireSeconds * 100;
+
+        try {
+            // 先尝试插入（唯一索引保证只有一个实例能插入成功）
+            int inserted = jdbcTemplate.update(
+                    "INSERT INTO distributed_lock (lock_key, lock_holder, expire_time) VALUES (?, ?, ?)",
+                    lockKey, holder, expireTime
+            );
+            return inserted > 0;
+        } catch (DuplicateKeyException e) {
+            // 插入失败说明锁已被占用，检查是否过期
+            Long oldExpireTime = jdbcTemplate.queryForObject(
+                    "SELECT expire_time FROM distributed_lock WHERE lock_key = ?",
+                    Long.class, lockKey
+            );
+            if (oldExpireTime != null && oldExpireTime < now) {
+                // 锁已过期，尝试抢占（CAS 操作）
+                int updated = jdbcTemplate.update(
+                        "UPDATE distributed_lock SET lock_holder = ?, expire_time = ? WHERE lock_key = ? AND expire_time = ?",
+                        holder, expireTime, lockKey, oldExpireTime
+                );
+                return updated > 0;
+            }
+            return false;
+        }
+    }
+
+    /**
+     * 释放锁（只有持有者才能释放）
+     */
+    public boolean unlock(String lockKey, String holder) {
+        int deleted = jdbcTemplate.update(
+                "DELETE FROM distributed_lock WHERE lock_key = ? AND lock_holder = ?",
+                lockKey, holder
+        );
+        return deleted > 0;
+    }
+```
+
+**使用：**
+```java
+@Component
+@Slf4j
+public class HotTagCategoryTask {
+
+    @Resource
+    private DatabaseLockManager databaseLockManager;
+
+    @Scheduled(cron = "0 0 2 * ?")
+    public void calculateHotTagsAndCategories() {
+        String lockKey = "hot_tag_category_lock";
+        String holder = UUID.randomUUID().toString();  // 当前实例唯一标识
+        try {
+            boolean locked = databaseLockManager.tryLock(lockKey, holder, 360);
+            if (!locked) {
+                log.info("未获取到数据库分布式锁，跳过本次执行");
+                return;
+            }
+            log.info("获取数据库分布式锁成功，开始统计热门标签和分类");
+
+            // 执行统计逻辑...
+            doCalculate();
+
+        } catch (Exception e) {
+            log.error("热门标签统计异常", e);
+        } finally {
+            databaseLockManager.unlock(lockKey, holder);
+        }
+    }
+```
+
+---
+
+### 方式二：SELECT FOR UPDATE（行级悲观锁）
+
+```java
+@Component
+@Slf4j
+public class HotTagCategoryTask {
+
+    @Resource
+    private DataSource dataSource;
+
+    @Scheduled(cron = "0 0 2 * ?")
+    public void calculateHotTagsAndCategories() {
+        try (Connection conn = dataSource.getConnection()) {
+            // 关闭自动提交，开启事务
+            conn.setAutoCommit(false);
+
+            // 加行级排他锁（如果该行被其他事务锁定，会阻塞等待）
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT lock_key FROM distributed_lock WHERE lock_key = 'hot_tag_category_lock' FOR UPDATE")) {
+                ResultSet rs = ps.executeQuery();
+
+                if (rs.next()) {
+                    log.info("获取数据库悲观锁成功，开始统计");
+                    // 执行统计逻辑...
+                    doCalculate();
+                }
+            }
+            // 提交事务 = 释放锁
+            conn.commit();
+
+        } catch (Exception e) {
+            log.error("热门标签统计异常", e);
+        }
+    }
+```
+
+---
+
+## 四种分布式锁对比
+
+| 方案 | 实现复杂度 | 性能 | 可靠性 | 适用场景 |
+|------|-----------|------|--------|---------|
+| **Redis Redisson** | 低 | 高 | 高 | 最常用，Spring Boot 首选 |
+| **Redis SETNX** | 低 | 高 | 中 | 轻量级，不引入框架 |
+| **Zookeeper** | 高 | 中 | **最高**（强一致性） | 对一致性要求极高的场景 |
+| **数据库唯一索引** | 中 | **最低** | 中 | 不想引入新中间件的小项目 |
+| **数据库悲观锁** | 中 | **最低** | 中 | 已有数据库的项目临时方案 |
+
+**当前项目推荐**：Redis Redisson（简单高效），如果不想引入 Redis，数据库唯一索引方案即可。引入 Redis，用数据库唯一索引方案即可。

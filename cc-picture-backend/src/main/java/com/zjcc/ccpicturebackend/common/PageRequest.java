@@ -27,4 +27,13 @@ public class PageRequest {
      * 排序顺序（默认降序）
      */
     private String sortOrder = "descend";
+
+    public int getCurrent() {
+        return Math.max(1, current);
+    }
+
+    public int getPageSize() {
+        return Math.min(Math.max(1, pageSize), 100);  // 限制最大 100
+    }
+
 }
