@@ -11,10 +11,7 @@ import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.manager.FileManager;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureEditRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureUpdateRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
+import com.zjcc.ccpicturebackend.model.dto.picture.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.vo.PictureTagCategory;
@@ -219,5 +216,14 @@ public class PictureController {
         return ResultUtils.success(pictureTagCategory);
     }
 
+    @PostMapping("/review")
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<Boolean> doPictureReview(@RequestBody PictureReviewRequest pictureReviewRequest,
+                                                 HttpServletRequest request) {
+        ThrowUtils.throwIf(pictureReviewRequest == null, ErrorCode.PARAMS_ERROR);
+        User loginUser = userService.getLoginUser(request);
+        pictureService.doPictureReview(pictureReviewRequest,loginUser);
+        return ResultUtils.success(true);
+    }
 
 }

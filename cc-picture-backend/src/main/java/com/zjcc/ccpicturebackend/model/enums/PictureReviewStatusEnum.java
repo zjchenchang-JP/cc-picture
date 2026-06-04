@@ -5,6 +5,7 @@ import lombok.Getter;
 
 /**
  * 审核状态枚举类
+ * 枚举天生就是单例，== 和 equals 效果完全一样
  */
 @Getter
 public enum PictureReviewStatusEnum {  
@@ -14,7 +15,7 @@ public enum PictureReviewStatusEnum {
   
     private final String text;  
     private final int value;  
-  
+
     PictureReviewStatusEnum(String text, int value) {  
         this.text = text;  
         this.value = value;  

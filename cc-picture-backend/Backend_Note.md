@@ -1223,3 +1223,87 @@ public class HotTagCategoryTask {
 | **数据库悲观锁** | 中 | **最低** | 中 | 已有数据库的项目临时方案 |
 
 **当前项目推荐**：Redis Redisson（简单高效），如果不想引入 Redis，数据库唯一索引方案即可。引入 Redis，用数据库唯一索引方案即可。
+
+---
+# 2026/06/04
+## 图片并发审核问题分析
+
+### doPictureReview 方法是否存在权限中途被撤销的风险？
+
+执行时间线：
+```
+请求1：管理员审核图片
+    ↓
+@AuthCheck 校验权限 ✓（此时还是管理员）
+    ↓
+doPictureReview 执行中...
+    ↓                      ← 时间窗口（毫秒级）
+updateById 操作数据库 ✓
+    ↓
+请求结束
+
+请求2：撤销管理员权限（几乎同时发生）
+    ↓
+修改数据库 user.role
+```
+
+**结论：当前单体应用中基本没有风险**，因为整个请求处理是毫秒级的。
+
+### 并发审核（更实际的风险）
+
+两个管理员同时审核同一张图片：
+```
+管理员A：审核通过 → reviewStatus = 1
+管理员B：审核拒绝 → reviewStatus = 2（覆盖了A的结果）
+```
+
+**影响评估：** 不涉及资金、库存等关键数据，只是最终审核状态以谁后执行为准，业务上可以接受。且已有重复审核校验能防住大部分情况：
+```java
+if (oldPicture.getReviewStatus().equals(reviewStatus)) {
+    throw new BusinessException(ErrorCode.PARAMS_ERROR, "请勿重复审核");
+}
+```
+
+### 如果要加乐观锁，SQL 对比
+
+**不加乐观锁（当前）：**
+```sql
+UPDATE picture SET reviewStatus = 1, reviewerId = 100, reviewTime = '2026-06-03'
+WHERE id = 123
+```
+
+**加了乐观锁：**
+```sql
+UPDATE picture SET reviewStatus = 1, reviewerId = 100, reviewTime = '2026-06-03'
+WHERE id = 123 AND reviewStatus = 0
+```
+
+区别就是 WHERE 多了一个 `AND reviewStatus = 0`。如果被其他管理员改了，条件不匹配，更新行数为 0。
+
+### 性能影响
+
+| 方式 | 额外开销 | 是否会阻塞等待 |
+|------|---------|---------------|
+| 乐观锁 | 多一个 WHERE 条件 | 不会 |
+| 悲观锁（SELECT FOR UPDATE） | 需要加行锁 | 会阻塞等待 |
+
+### 总结
+
+| 问题 | 答案 |
+|------|------|
+| 并发审核重要吗？ | 不重要，不涉及资金等关键数据 |
+| 需要加乐观锁吗？ | 当前项目不需要 |
+| 乐观锁影响性能吗？ | 几乎不影响（多一个 WHERE 条件而已） |
+
+**当前项目保持现状就好。** 如果未来是订单审核、资金审核这类场景，才需要考虑乐观锁。
+
+### 如果要严格处理权限中途变更
+
+可以在执行操作前再校验一次：
+```java
+// 二次校验权限（防止权限中途被撤销）
+User freshUser = userService.getById(loginUser.getId());
+if (!UserRoleEnum.ADMIN.getValue().equals(freshUser.getUserRole())) {
+    throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "权限已被撤销");
+}
+```

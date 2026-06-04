@@ -3,6 +3,7 @@ package com.zjcc.ccpicturebackend.service;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
+import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.baomidou.mybatisplus.extension.service.IService;
@@ -61,5 +62,13 @@ public interface PictureService extends IService<Picture> {
      * 提高代码健壮性, 用于更新和修改图片时进行判断
      */
     void validPicture(Picture picture);
+
+    /**
+     * 图片审核
+     * @param pictureReviewRequest
+     * @param loginUser
+     */
+    void doPictureReview(PictureReviewRequest pictureReviewRequest, User loginUser);
+
 
 }

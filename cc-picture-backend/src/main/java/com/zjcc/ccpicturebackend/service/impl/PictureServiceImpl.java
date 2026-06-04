@@ -6,20 +6,24 @@ import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.manager.FileManager;
 import com.zjcc.ccpicturebackend.model.dto.file.UploadPictureResult;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
+import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.User;
+import com.zjcc.ccpicturebackend.model.enums.PictureReviewStatusEnum;
 import com.zjcc.ccpicturebackend.model.vo.PictureVO;
 import com.zjcc.ccpicturebackend.model.vo.UserVO;
 import com.zjcc.ccpicturebackend.service.PictureService;
 import com.zjcc.ccpicturebackend.mapper.PictureMapper;
 import com.zjcc.ccpicturebackend.service.UserService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -222,6 +226,43 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         if (StrUtil.isNotBlank(introduction)) {
             ThrowUtils.throwIf(introduction.length() > 800, ErrorCode.PARAMS_ERROR, "简介过长");
         }
+    }
+
+    @Override
+    public void doPictureReview(PictureReviewRequest pictureReviewRequest, User loginUser) {
+        Long id = pictureReviewRequest.getId();
+        Integer reviewStatus = pictureReviewRequest.getReviewStatus();
+        PictureReviewStatusEnum reviewStatusEnum = PictureReviewStatusEnum.getEnumByValue(reviewStatus);
+        // 枚举是单例，== 和 equals 效果完全一样
+        if (id == null || reviewStatusEnum == null || PictureReviewStatusEnum.REVIEWING.equals(reviewStatusEnum)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        // 判断审核图片是否存在
+        Picture oldPicture = this.getById(id);
+        ThrowUtils.throwIf(oldPicture == null, ErrorCode.NOT_FOUND_ERROR);
+        // 已经是该审核状态
+        if (oldPicture.getReviewStatus().equals(reviewStatus)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "请勿重复审核");
+        }
+        Picture updatePicture = new Picture();
+        BeanUtils.copyProperties(pictureReviewRequest,updatePicture);
+        updatePicture.setReviewerId(loginUser.getId());
+        updatePicture.setReviewTime(new Date());
+        boolean result = this.updateById(updatePicture);
+        // 应该数据库级别的乐观锁
+        // 并发审核风险
+        // 两个管理员同时审核同一张图片,一个通过，一个拒绝，谁后执行谁覆盖，结果不可预期
+        // 但 对于图片审核场景，并发审核的影响确实不大。因为：
+        //      审核操作不涉及资金、库存等关键业务
+        //      即使两个管理员同时审核，最终结果只是"以最后一个为准"
+        //      不会造成数据不一致或资金损失
+        // UPDATE picture SET reviewStatus = 1, reviewerId = 100, reviewTime = '2026-06-03' WHERE id = 123 AND reviewStatus = 0
+        // boolean result = this.update()
+        //         .eq("id", id)
+        //         // 乐观锁：确保状态没被改过
+        //         .eq("reviewStatus", oldPicture.getReviewStatus())
+        //         .update(updatePicture);
+        ThrowUtils.throwIf(!result,ErrorCode.OPERATION_ERROR);
     }
 }
 
