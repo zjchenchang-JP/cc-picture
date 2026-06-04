@@ -70,5 +70,13 @@ public interface PictureService extends IService<Picture> {
      */
     void doPictureReview(PictureReviewRequest pictureReviewRequest, User loginUser);
 
+    /**
+     * 填充审核参数，方便其他方法使用
+     * @param picture   待填充的 picture参数
+     * @param loginUser 登录的用户
+     * 图片上传、用户编辑、管理员更新这 3 个操作都需要设置审核状态，
+     * 所以抽取一个通用的 “补充审核参数” 的方法，根据用户的角色给图片对象填充审核字段的值
+     */
+    void fillReviewParams(Picture picture, User loginUser);
 
 }

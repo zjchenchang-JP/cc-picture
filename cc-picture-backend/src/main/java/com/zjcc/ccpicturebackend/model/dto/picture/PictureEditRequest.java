@@ -8,6 +8,7 @@ import java.util.List;
 /**
  * 图片编辑请求 普通用户用
  * 一般可修改的字段范围 小于更新请求
+ * 名称、简介、标签、分类（前端手动填写）
  */
 @Data
 public class PictureEditRequest implements Serializable {

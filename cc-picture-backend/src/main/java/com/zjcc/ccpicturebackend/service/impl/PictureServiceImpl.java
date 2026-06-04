@@ -69,9 +69,16 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 如果是更新图片要校验图片是否存在
         if (pictureId != null) {
             // 说明是更新
-            boolean exists = this.lambdaQuery().eq(Picture::getId, pictureId)
-                    .exists();
-            ThrowUtils.throwIf(!exists, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+            // 版本1.0 默认是管理员才能上传
+            // boolean exists = this.lambdaQuery().eq(Picture::getId, pictureId)
+            //         .exists();
+            // ThrowUtils.throwIf(!exists, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+            Picture oldPicture = this.getById(pictureId);
+            ThrowUtils.throwIf(oldPicture == null, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+            // 仅上传者本人或管理员可编辑 权限校验逻辑
+            if (!oldPicture.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
+                throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
+            }
         }
         // 上传图片
         // 按照用户 id 划分 上传目录
@@ -91,9 +98,14 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         picture.setPicScale(uploadPictureResult.getPicScale());
         picture.setPicFormat(uploadPictureResult.getPicFormat());
         picture.setUserId(loginUser.getId());
+        // 补充审核参数
+        fillReviewParams(picture, loginUser);
         // 如果 pictureId 不为空，表示更新，否则是新增
         if (pictureId != null) {
             // 如果是更新还需传入id 和编辑时间
+            // URL、尺寸、大小、格式（从文件自动获取）
+            // 场景：想把一张模糊的图片换成高清的 上传新图片文件替换旧的
+            // 保留老记录的 id，替换图片文件相关的所有属性
             picture.setId(pictureId);
             picture.setEditTime(new Date());
         }
@@ -263,6 +275,21 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         //         .eq("reviewStatus", oldPicture.getReviewStatus())
         //         .update(updatePicture);
         ThrowUtils.throwIf(!result,ErrorCode.OPERATION_ERROR);
+    }
+
+    @Override
+    public void fillReviewParams(Picture picture, User loginUser) {
+        if (userService.isAdmin(loginUser)) {
+            // 管理员自动过审
+            picture.setReviewStatus(PictureReviewStatusEnum.PASS.getValue());
+            picture.setReviewerId(loginUser.getId());
+            picture.setReviewTime(new Date());
+            picture.setReviewMessage("管理员自动过审");
+        } else {
+            // 非管理员，创建或编辑都要改为待审核
+            // 不能设置审核人ID, 未来具体的管理员审核时doPictureReview 再填充
+            picture.setReviewStatus(PictureReviewStatusEnum.REVIEWING.getValue());
+        }
     }
 }
 
