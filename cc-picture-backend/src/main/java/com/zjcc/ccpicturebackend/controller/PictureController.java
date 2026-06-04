@@ -14,6 +14,7 @@ import com.zjcc.ccpicturebackend.manager.FileManager;
 import com.zjcc.ccpicturebackend.model.dto.picture.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.User;
+import com.zjcc.ccpicturebackend.model.enums.PictureReviewStatusEnum;
 import com.zjcc.ccpicturebackend.model.vo.PictureTagCategory;
 import com.zjcc.ccpicturebackend.model.vo.PictureVO;
 import com.zjcc.ccpicturebackend.service.PictureService;
@@ -155,6 +156,7 @@ public class PictureController {
 
     /**
      * 分页获取图片列表（封装类）
+     * 主页给用户展示图片列表
      */
     @PostMapping("/list/page/vo")
     public BaseResponse<Page<PictureVO>> listPictureVOByPage(@RequestBody PictureQueryRequest pictureQueryRequest, HttpServletRequest request) {
@@ -163,6 +165,8 @@ public class PictureController {
         long pageSize = pictureQueryRequest.getPageSize();
         // 限制爬虫  最多允许一次看20条数据
         ThrowUtils.throwIf(pageSize > 20, ErrorCode.PARAMS_ERROR);
+        // v2.0 默认只能查看已过审的数据
+        pictureQueryRequest.setReviewStatus(PictureReviewStatusEnum.PASS.getValue());
         // 查询数据库
         Page<Picture> picturePage = pictureService.page(new Page<>(current, pageSize),
                 pictureService.getQueryWrapper(pictureQueryRequest));

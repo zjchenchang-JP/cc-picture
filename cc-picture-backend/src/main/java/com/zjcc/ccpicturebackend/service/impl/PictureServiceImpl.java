@@ -135,6 +135,16 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         Long userId = pictureQueryRequest.getUserId();
         String sortField = pictureQueryRequest.getSortField();
         String sortOrder = pictureQueryRequest.getSortOrder();
+
+        // v2.0 新增审核相关字段 扩展支持根据审核字段进行查询
+        // 实现 “管理员筛选审核状态” 的功能
+        Integer reviewStatus = pictureQueryRequest.getReviewStatus();
+        String reviewMessage = pictureQueryRequest.getReviewMessage();
+        Long reviewerId = pictureQueryRequest.getReviewerId();
+        queryWrapper.eq(ObjUtil.isNotEmpty(reviewStatus), "reviewStatus", reviewStatus);
+        queryWrapper.like(StrUtil.isNotBlank(reviewMessage), "reviewMessage", reviewMessage);
+        queryWrapper.eq(ObjUtil.isNotEmpty(reviewerId), "reviewerId", reviewerId);
+
         // searchText：前端搜索框输入的关键词，在多个字段中模糊搜索（name OR introduction）
         // 假设传入 searchText = "风景"，name = "山水"，最终 SQL :
         /*
@@ -150,6 +160,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
                     .or()
                     .like("introduction", searchText));
         }
+        // v1.0
         queryWrapper.eq(ObjUtil.isNotEmpty(id), "id", id);
         queryWrapper.eq(ObjUtil.isNotEmpty(userId), "userId", userId);
         queryWrapper.like(StrUtil.isNotBlank(name), "name", name);
