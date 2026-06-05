@@ -100,10 +100,10 @@ public class UserController {
      */
     @GetMapping("/get")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
-    public BaseResponse<User> getUserById(long id) {
+    public BaseResponse<User> getUserById(Long id) {
         ThrowUtils.throwIf(id <= 0, ErrorCode.PARAMS_ERROR);
         User user = userService.getById(id);
-        ThrowUtils.throwIf(null ==user,ErrorCode.NOT_FOUND_ERROR);
+        ThrowUtils.throwIf(null == user,ErrorCode.NOT_FOUND_ERROR);
         return ResultUtils.success(user);
     }
 
@@ -111,7 +111,7 @@ public class UserController {
      * 根据 id 获取包装类
      */
     @GetMapping("/get/vo")
-    public BaseResponse<UserVO> getUserVOById(long id) {
+    public BaseResponse<UserVO> getUserVOById(Long id) {
         BaseResponse<User> userById = getUserById(id);
         User user = userById.getData();
         UserVO userVO = userService.getUserVO(user);
