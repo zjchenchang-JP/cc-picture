@@ -32,13 +32,14 @@ import java.util.Date;
 import java.util.List;
 
 /**
- * 通用COS操作类无法满足需求
+ * 通用COS操作类无法满足需求, 创建本类
  * 1）需要校验格式
  * 2）需要指定存储路径，就像 Redis 的 key 的路径一样，指定路径防止冲突
  * 3）需要获取上传的图片信息
  */
 @Service
 @Slf4j
+@Deprecated // 已废弃 改用抽象目标类 PictureUploadTemplate
 public class FileManager {
 
     @Resource
@@ -153,7 +154,7 @@ public class FileManager {
             tempFile = File.createTempFile(uploadPath, null);
             HttpUtil.downloadFile(fileUrl, tempFile);
 
-            // 上传图片
+            // 上传图片到COS
             long startTime = System.currentTimeMillis();
             PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, tempFile);
             long endTime = System.currentTimeMillis();

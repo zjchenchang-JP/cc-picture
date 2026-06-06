@@ -1,24 +1,15 @@
 package com.zjcc.ccpicturebackend.controller;
 
-import cn.hutool.core.date.DateUtil;
-import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.util.NumberUtil;
-import cn.hutool.core.util.RandomUtil;
 import com.qcloud.cos.model.COSObject;
 import com.qcloud.cos.model.COSObjectInputStream;
-import com.qcloud.cos.model.PutObjectResult;
-import com.qcloud.cos.model.ciModel.persistence.ImageInfo;
 import com.qcloud.cos.utils.IOUtils;
 import com.zjcc.ccpicturebackend.annotation.AuthCheck;
 import com.zjcc.ccpicturebackend.common.BaseResponse;
 import com.zjcc.ccpicturebackend.common.ResultUtils;
-import com.zjcc.ccpicturebackend.config.CosClientConfig;
 import com.zjcc.ccpicturebackend.constant.UserConstant;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
-import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.manager.CosManager;
-import com.zjcc.ccpicturebackend.model.dto.file.UploadPictureResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;

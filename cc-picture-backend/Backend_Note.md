@@ -1307,3 +1307,418 @@ if (!UserRoleEnum.ADMIN.getValue().equals(freshUser.getUserRole())) {
     throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "权限已被撤销");
 }
 ```
+
+---
+
+# 2026/06/06
+## Manager 包：文件上传逻辑的模板方法模式演变
+
+### FileManager 的两种上传方式（旧代码）
+
+在重构之前，`FileManager` 类中存在两个上传方法，它们的核心流程完全一致，但实现细节不同：
+
+#### 方法1：本地文件上传 `uploadPicture(MultipartFile, String)`
+```java
+public UploadPictureResult uploadPicture(MultipartFile multipartFile, String uploadPathPrefix) {
+    // 1. 校验图片（本地文件）
+    validPicture(multipartFile);
+    
+    // 2. 生成上传路径
+    String uuid = RandomUtil.randomString(16);
+    String originFilename = multipartFile.getOriginalFilename();
+    String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
+    
+    File file = null;
+    try {
+        // 3. 创建临时文件
+        file = File.createTempFile(uploadPath, null);
+        multipartFile.transferTo(file);
+        
+        // 4. 上传到COS
+        PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, file);
+        
+        // 5. 封装返回结果
+        UploadPictureResult uploadPictureResult = new UploadPictureResult();
+        // ... 设置各种属性 ...
+        return uploadPictureResult;
+    } finally {
+        // 6. 清理临时文件
+        this.deleteTempFile(file);
+    }
+}
+```
+
+#### 方法2：URL上传 `uploadPictureByUrl(String, String)`
+```java
+public UploadPictureResult uploadPictureByUrl(String fileUrl, String uploadPathPrefix) {
+    // 1. 校验图片（URL方式校验）
+    validPicture(fileUrl);
+    
+    // 2. 生成上传路径（类似）
+    String uuid = RandomUtil.randomString(16);
+    String originFilename = FileUtil.mainName(fileUrl);
+    String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
+    
+    File tempFile = null;
+    try {
+        // 3. 创建临时文件
+        tempFile = File.createTempFile(uploadPath, null);
+        HttpUtil.downloadFile(fileUrl, tempFile);  // ← 不同点：从URL下载
+        
+        // 4. 上传到COS（完全相同）
+        PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, tempFile);
+        
+        // 5. 封装返回结果（完全相同）
+        UploadPictureResult uploadPictureResult = new UploadPictureResult();
+        // ... 设置各种属性（相同代码）...
+        return uploadPictureResult;
+    } finally {
+        // 6. 清理临时文件（完全相同）
+        this.deleteTempFile(tempFile);
+    }
+}
+```
+
+### 问题分析
+
+两个方法的流程**完全一致**，但存在**大量重复代码**：
+
+| 步骤 | 本地上传 | URL上传 | 是否相同 |
+|------|---------|---------|---------|
+| 1. 校验图片 | `validPicture(MultipartFile)` | `validPicture(String)` | ❌ 不同 |
+| 2. 生成路径 | 从 MultipartFile 获取 | 从 URL 获取 | ❌ 不同 |
+| 3. 创建临时文件 | `multipartFile.transferTo()` | `HttpUtil.downloadFile()` | ❌ 不同 |
+| 4. 上传COS | `cosManager.putPictureObject()` | `cosManager.putPictureObject()` | ✓ 相同 |
+| 5. 封装结果 | 相同代码 | 相同代码 | ✓ 相同 |
+| 6. 清理文件 | `deleteTempFile()` | `deleteTempFile()` | ✓ 相同 |
+
+**代码重复率超过60%**，这是典型的"流程相同、细节不同"场景。
+
+---
+
+### 重构：模板方法模式
+
+#### 核心思想
+
+将通用流程定义在抽象类中，将不同的部分抽象为方法，由子类实现。
+
+#### 模板抽象类 `PictureUploadTemplate`
+
+```java
+@Slf4j
+public abstract class PictureUploadTemplate {
+    
+    @Resource
+    protected CosManager cosManager;
+    
+    @Resource
+    protected CosClientConfig cosClientConfig;
+    
+    /**
+     * 模板方法：定义上传流程（final防止子类修改）
+     */
+    public final UploadPictureResult uploadPicture(Object inputSource, String uploadPathPrefix) {
+        // 1. 校验图片（抽象方法，子类实现）
+        validPicture(inputSource);
+        
+        // 2. 图片上传地址（抽象方法，子类实现获取文件名）
+        String uuid = RandomUtil.randomString(16);
+        String originFilename = getOriginFilename(inputSource);
+        String uploadFilename = String.format("%s_%s.%s", DateUtil.formatDate(new Date()), uuid, FileUtil.getSuffix(originFilename));
+        String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
+        
+        File file = null;
+        try {
+            // 3. 创建临时文件
+            file = File.createTempFile(uploadPath, null);
+            // 处理文件来源（抽象方法，子类实现）
+            processFile(inputSource, file);
+            
+            // 4. 上传图片到对象存储
+            PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, file);
+            ImageInfo imageInfo = putObjectResult.getCiUploadResult().getOriginalInfo().getImageInfo();
+            
+            // 5. 封装返回结果（通用逻辑）
+            return buildResult(originFilename, file, uploadPath, imageInfo);
+        } catch (Exception e) {
+            log.error("图片上传到对象存储失败，路径 = {}", uploadPath, e);
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "上传失败");
+        } finally {
+            // 6. 清理临时文件（通用逻辑）
+            deleteTempFile(file);
+        }
+    }
+    
+    // ===== 三个抽象方法，由子类实现 =====
+    
+    /**
+     * 校验输入源（本地文件或 URL）
+     */
+    protected abstract void validPicture(Object inputSource);
+    
+    /**
+     * 获取输入源的原始文件名
+     */
+    protected abstract String getOriginFilename(Object inputSource);
+    
+    /**
+     * 处理输入源并生成本地临时文件
+     */
+    protected abstract void processFile(Object inputSource, File file) throws Exception;
+    
+    // ===== 通用私有方法 =====
+    
+    private UploadPictureResult buildResult(String originFilename, File file, String uploadPath, ImageInfo imageInfo) {
+        UploadPictureResult uploadPictureResult = new UploadPictureResult();
+        int picWidth = imageInfo.getWidth();
+        int picHeight = imageInfo.getHeight();
+        double picScale = NumberUtil.round(picWidth * 1.0 / picHeight, 2).doubleValue();
+        uploadPictureResult.setPicName(FileUtil.mainName(originFilename));
+        uploadPictureResult.setPicWidth(picWidth);
+        uploadPictureResult.setPicHeight(picHeight);
+        uploadPictureResult.setPicScale(picScale);
+        uploadPictureResult.setPicFormat(imageInfo.getFormat());
+        uploadPictureResult.setPicSize(FileUtil.size(file));
+        uploadPictureResult.setUrl(cosClientConfig.getHost() + "/" + uploadPath);
+        return uploadPictureResult;
+    }
+    
+    public void deleteTempFile(File file) {
+        if (file == null) {
+            return;
+        }
+        boolean deleteResult = file.delete();
+        if (!deleteResult) {
+            log.error("file delete error, filepath = {}", file.getAbsolutePath());
+        }
+    }
+}
+```
+
+---
+
+#### 子类实现1：FilePictureUpload（本地文件上传）
+
+```java
+@Service
+public class FilePictureUpload extends PictureUploadTemplate {
+    
+    @Override
+    protected void validPicture(Object inputSource) {
+        MultipartFile multipartFile = (MultipartFile) inputSource;
+        ThrowUtils.throwIf(multipartFile == null, ErrorCode.PARAMS_ERROR, "文件不能为空");
+        
+        // 1. 校验文件大小
+        long fileSize = multipartFile.getSize();
+        final long ONE_M = 1024 * 1024L;
+        ThrowUtils.throwIf(fileSize > 2 * ONE_M, ErrorCode.PARAMS_ERROR, "文件大小不能超过 2M");
+        
+        // 2. 校验文件后缀
+        String fileSuffix = FileUtil.getSuffix(multipartFile.getOriginalFilename());
+        final List<String> ALLOW_FORMAT_LIST = Arrays.asList("jpeg", "jpg", "png", "webp");
+        ThrowUtils.throwIf(!ALLOW_FORMAT_LIST.contains(fileSuffix), ErrorCode.PARAMS_ERROR, "文件类型错误");
+    }
+    
+    @Override
+    protected String getOriginFilename(Object inputSource) {
+        MultipartFile multipartFile = (MultipartFile) inputSource;
+        return multipartFile.getOriginalFilename();
+    }
+    
+    @Override
+    protected void processFile(Object inputSource, File file) throws Exception {
+        MultipartFile multipartFile = (MultipartFile) inputSource;
+        multipartFile.transferTo(file);
+    }
+}
+```
+
+---
+
+#### 子类实现2：UrlPictureUpload（URL上传）
+
+```java
+@Service
+public class UrlPictureUpload extends PictureUploadTemplate {
+    
+    @Override
+    protected void validPicture(Object inputSource) {
+        String fileUrl = (String) inputSource;
+        ThrowUtils.throwIf(StrUtil.isBlank(fileUrl), ErrorCode.PARAMS_ERROR, "文件地址不能为空");
+        
+        try {
+            // 1. 校验url格式
+            new URL(fileUrl);
+        } catch (MalformedURLException e) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "URL格式不正确");
+        }
+        
+        // 2. 校验URL协议
+        ThrowUtils.throwIf(!(fileUrl.startsWith("http://") || fileUrl.startsWith("https://")),
+                ErrorCode.PARAMS_ERROR, "仅支持 HTTP 或 HTTPS 协议的文件地址");
+        
+        // 3. 发送 HEAD 请求验证文件
+        HttpResponse response = null;
+        try {
+            response = HttpUtil.createRequest(Method.HEAD, fileUrl).execute();
+            if (response.getStatus() != HttpStatus.HTTP_OK) {
+                return;
+            }
+            
+            // 4. 校验文件类型
+            String contentType = response.header("Content-Type");
+            if (StrUtil.isNotBlank(contentType)) {
+                final List<String> ALLOW_CONTENT_TYPES = Arrays.asList("image/jpeg", "image/jpg", "image/png", "image/webp");
+                ThrowUtils.throwIf(!ALLOW_CONTENT_TYPES.contains(contentType.toLowerCase()),
+                        ErrorCode.PARAMS_ERROR, "文件类型错误");
+            }
+            
+            // 5. 校验文件大小
+            String contentLengthStr = response.header("Content-Length");
+            if (StrUtil.isNotBlank(contentLengthStr)) {
+                try {
+                    long contentLength = Long.parseLong(contentLengthStr);
+                    final long ONE_M = 1024 * 1024L;
+                    ThrowUtils.throwIf(contentLength > 2 * ONE_M, ErrorCode.PARAMS_ERROR, "文件大小不能超过 2M");
+                } catch (NumberFormatException e) {
+                    throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件大小格式错误");
+                }
+            }
+        } finally {
+            if (response != null) {
+                response.close();
+            }
+        }
+    }
+    
+    @Override
+    protected String getOriginFilename(Object inputSource) {
+        String fileUrl = (String) inputSource;
+        return FileUtil.mainName(fileUrl);
+    }
+    
+    @Override
+    protected void processFile(Object inputSource, File file) throws Exception {
+        String fileUrl = (String) inputSource;
+        HttpUtil.downloadFile(fileUrl, file);
+    }
+}
+```
+
+---
+
+### 重构对比总结
+
+#### 代码结构对比
+
+| 方面 | 旧代码（FileManager） | 新代码（模板方法模式） |
+|------|---------------------|---------------------|
+| **类数量** | 1个类 | 1个抽象类 + 2个子类 |
+| **重复代码** | 大量重复（60%+） | 几乎无重复 |
+| **扩展性** | 新增上传方式需修改现有类 | 新增上传方式只需新增子类 |
+| **可维护性** | 修改一处需要同步修改另一处 | 修改模板类自动应用到所有子类 |
+| **代码量** | ~270行 | 总计~250行，但结构更清晰 |
+
+#### 职责划分
+
+```
+┌─────────────────────────────────────────────────┐
+│         PictureUploadTemplate（抽象模板）          │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │
+│  ✓ 定义通用上传流程                              │
+│  ✓ 实现通用逻辑（路径生成、COS上传、结果封装）    │
+│  ✗ 抽象差异化方法（校验、获取文件名、处理文件）    │
+└─────────────────────────────────────────────────┘
+           △                        △
+           │                        │
+    ┌──────┴────────┐      ┌───────┴────────┐
+    │ FilePictureUpload│    │ UrlPictureUpload│
+    │  （本地文件上传）  │    │  （URL上传）     │
+    └─────────────────┘    └─────────────────┘
+```
+
+#### 使用方式对比
+
+**旧代码：**
+```java
+@Resource
+private FileManager fileManager;
+
+// 本地文件上传
+UploadPictureResult result1 = fileManager.uploadPicture(multipartFile, "/picture");
+
+// URL上传
+UploadPictureResult result2 = fileManager.uploadPictureByUrl(fileUrl, "/picture");
+```
+
+**新代码：**
+```java
+@Resource
+private FilePictureUpload filePictureUpload;
+
+@Resource
+private UrlPictureUpload urlPictureUpload;
+
+// 本地文件上传
+UploadPictureResult result1 = filePictureUpload.uploadPicture(multipartFile, "/picture");
+
+// URL上传
+UploadPictureResult result2 = urlPictureUpload.uploadPicture(fileUrl, "/picture");
+```
+
+---
+
+### 设计模式总结
+
+#### 模板方法模式的适用场景
+
+当满足以下条件时，应使用模板方法模式：
+
+1. **流程相同**：多个操作的核心流程一致
+2. **细节不同**：某些步骤的实现方式不同
+3. **避免重复**：存在大量重复代码
+4. **需要扩展**：未来可能新增类似的实现
+
+#### 本项目中的应用
+
+| 场景 | 流程 | 差异点 |
+|------|------|--------|
+| 文件上传 | 校验→路径→临时文件→COS→结果→清理 | 校验方式、获取文件名、处理文件 |
+| （可扩展）支付流程 | 验证→扣款→通知 | 支付渠道、签名方式、回调处理 |
+
+#### 关键设计点
+
+1. **模板方法用 final 修饰**：防止子类修改核心流程
+2. **抽象方法 protected**：子类可见，外部不可见
+3. **通用方法 private**：不暴露给子类
+4. **依赖注入**：子类通过 @Resource 继承父类的依赖
+
+#### 扩展性示例
+
+如果要新增"Base64上传"方式，只需：
+
+```java
+@Service
+public class Base64PictureUpload extends PictureUploadTemplate {
+    
+    @Override
+    protected void validPicture(Object inputSource) {
+        String base64 = (String) inputSource;
+        // 校验 Base64 格式
+    }
+    
+    @Override
+    protected String getOriginFilename(Object inputSource) {
+        // 从 Base64 中提取文件名
+        return "base64_upload";
+    }
+    
+    @Override
+    protected void processFile(Object inputSource, File file) throws Exception {
+        String base64 = (String) inputSource;
+        // 解码 Base64 并写入文件
+    }
+}
+```
+
+无需修改任何现有代码，符合**开闭原则**（对扩展开放，对修改关闭）。
