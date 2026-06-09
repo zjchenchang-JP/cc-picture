@@ -69,11 +69,16 @@ public class UrlPictureUpload extends PictureUploadTemplate {
         }
     }  
   
-    @Override  
-    protected String getOriginFilename(Object inputSource) {  
-        String fileUrl = (String) inputSource;  
-        // 从 URL 中提取文件名  
-        return FileUtil.mainName(fileUrl);
+    @Override
+    protected String getOriginFilename(Object inputSource) {
+        String fileUrl = (String) inputSource;
+        // 直接返回原始 URL，让模板方法统一处理文件名提取
+        // 去掉 URL 参数，保留文件名和后缀
+        int questionMarkIndex = fileUrl.indexOf("?");
+        if (questionMarkIndex > -1) {
+            fileUrl = fileUrl.substring(0, questionMarkIndex);
+        }
+        return fileUrl;
     }  
   
     @Override  
