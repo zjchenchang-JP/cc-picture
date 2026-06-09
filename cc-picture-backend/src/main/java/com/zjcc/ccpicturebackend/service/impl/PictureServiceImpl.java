@@ -112,7 +112,13 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 构造要入库的图片信息
         Picture picture = new Picture();
         picture.setUrl(uploadPictureResult.getUrl());
-        picture.setName(uploadPictureResult.getPicName());
+        String picName = uploadPictureResult.getPicName();
+        // 通过 pictureUploadRequest 对象获取到要手动设置的图片名称
+        if (pictureUploadRequest != null && StrUtil.isNotBlank(pictureUploadRequest.getPicName())) {
+            picName = pictureUploadRequest.getPicName();
+        }
+        // 如果未设置，仍依赖于解析的结果
+        picture.setName(picName);
         picture.setPicSize(uploadPictureResult.getPicSize());
         picture.setPicWidth(uploadPictureResult.getPicWidth());
         picture.setPicHeight(uploadPictureResult.getPicHeight());
@@ -331,6 +337,13 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 要上传的数量
         Integer count = pictureUploadByBatchRequest.getCount();
         ThrowUtils.throwIf(count > 30, ErrorCode.PARAMS_ERROR, "最多 30 条");
+        // 批量指定图片名
+        String namePrefix = pictureUploadByBatchRequest.getNamePrefix();
+        if (StrUtil.isBlank(namePrefix)) {
+            // 名称前缀默等于搜索关键词
+            namePrefix = searchText;
+        }
+
         // 要抓取的地址
         String fetchUrl = String.format("https://cn.bing.com/images/async?q=%s&mmasync=1", searchText);
         // Jsoup 抓取解析页面
@@ -367,6 +380,10 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             }
             // 上传图片
             PictureUploadRequest pictureUploadRequest = new PictureUploadRequest();
+            if (StrUtil.isNotBlank(namePrefix)) {
+                // 设置图片名称，序号连续递增
+                pictureUploadRequest.setPicName(namePrefix + (uploadCount + 1));
+            }
             try {
                 PictureVO pictureVO = this.uploadPicture(fileUrl, pictureUploadRequest, loginUser);
                 log.info("图片上传成功, id = {}", pictureVO.getId());

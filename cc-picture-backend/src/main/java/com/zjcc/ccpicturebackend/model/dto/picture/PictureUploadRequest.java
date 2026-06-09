@@ -22,6 +22,13 @@ public class PictureUploadRequest implements Serializable {
      * 扩展字段；支持通过url上传图片
      */
     private String fileUrl;
+
+    /**
+     * 图片名称 - 扩展功能字段 批量修改上传图片名
+     * 图片名称是在 uploadPicture 方法中传入并设置给 Picture 图片对象的
+     * 所以需要给该方法接受的参数 PictureUploadRequest 类中补充 picName 参数
+     */
+    private String picName;
   
     private static final long serialVersionUID = 1L;  
 }
