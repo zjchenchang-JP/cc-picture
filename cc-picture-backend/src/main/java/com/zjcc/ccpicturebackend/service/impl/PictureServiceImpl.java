@@ -16,6 +16,7 @@ import com.zjcc.ccpicturebackend.manager.upload.UrlPictureUpload;
 import com.zjcc.ccpicturebackend.model.dto.file.UploadPictureResult;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
+import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadByBatchRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.User;
@@ -26,6 +27,10 @@ import com.zjcc.ccpicturebackend.service.PictureService;
 import com.zjcc.ccpicturebackend.mapper.PictureMapper;
 import com.zjcc.ccpicturebackend.service.UserService;
 import lombok.extern.slf4j.Slf4j;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
@@ -34,6 +39,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+import java.io.IOException;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -316,6 +322,64 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             // 不能设置审核人ID, 未来具体的管理员审核时doPictureReview 再填充
             picture.setReviewStatus(PictureReviewStatusEnum.REVIEWING.getValue());
         }
+    }
+
+    @Override
+    public Integer uploadPictureByBatch(PictureUploadByBatchRequest pictureUploadByBatchRequest, User loginUser) {
+        // 搜索关键词，如"风景"
+        String searchText = pictureUploadByBatchRequest.getSearchText();
+        // 要上传的数量
+        Integer count = pictureUploadByBatchRequest.getCount();
+        ThrowUtils.throwIf(count > 30, ErrorCode.PARAMS_ERROR, "最多 30 条");
+        // 要抓取的地址
+        String fetchUrl = String.format("https://cn.bing.com/images/async?q=%s&mmasync=1", searchText);
+        // Jsoup 抓取解析页面
+        // Jsoup 是一个 Java HTML 解析库，可以像 jQuery 一样操作 DOM。
+        Document document;
+        try {
+            // 发送 HTTP 请求，获取 HTML 文档
+            document = Jsoup.connect(fetchUrl).get();
+        } catch (IOException e) {
+            log.error("获取页面失败", e);
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "获取页面失败");
+        }
+        // 定位图片元素
+        // 找到 class="dgControl" 的 div
+        Element div = document.getElementsByClass("dgControl").first();
+        if (ObjUtil.isNull(div)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "获取元素失败");
+        }
+        // 在该 div 下查找所有 class="mimg" 的 img 标签
+        Elements imgElementList = div.select("img.mimg");
+        // 循环上传每张图片
+        int uploadCount = 0; // 成功上传计数器
+        for (Element imgElement : imgElementList) {  // 遍历每个 img 元素
+            String fileUrl = imgElement.attr("src");  // 获取 src 属性（图片 URL）
+            if (StrUtil.isBlank(fileUrl)) {
+                log.info("当前链接为空，已跳过: {}", fileUrl);
+                continue;
+            }
+            // 处理图片 URL：去掉问号后的参数（防止转义问题）
+            int questionMarkIndex = fileUrl.indexOf("?");
+            if (questionMarkIndex > -1) {
+                // 示例：https://example.com/img.jpg?w=200&h=150 → https://example.com/img.jpg
+                fileUrl = fileUrl.substring(0, questionMarkIndex);
+            }
+            // 上传图片
+            PictureUploadRequest pictureUploadRequest = new PictureUploadRequest();
+            try {
+                PictureVO pictureVO = this.uploadPicture(fileUrl, pictureUploadRequest, loginUser);
+                log.info("图片上传成功, id = {}", pictureVO.getId());
+                uploadCount++; // 成功则计数+1
+            } catch (Exception e) {
+                log.error("图片上传失败", e);
+                continue; // 失败则跳过当前图片，继续下一张
+            }
+            if (uploadCount >= count) { // 达到目标数量，停止循环
+                break;
+            }
+        }
+        return uploadCount;
     }
 }
 

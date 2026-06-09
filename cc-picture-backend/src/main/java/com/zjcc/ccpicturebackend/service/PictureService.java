@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
+import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadByBatchRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.baomidou.mybatisplus.extension.service.IService;
@@ -79,5 +80,17 @@ public interface PictureService extends IService<Picture> {
      * 所以抽取一个通用的 “补充审核参数” 的方法，根据用户的角色给图片对象填充审核字段的值
      */
     void fillReviewParams(Picture picture, User loginUser);
+
+
+    /**
+     * 从Bing.com 批量抓取和创建图片
+     *
+     * @param pictureUploadByBatchRequest
+     * @param loginUser
+     * @return 成功创建的图片数
+     */
+    Integer uploadPictureByBatch(PictureUploadByBatchRequest pictureUploadByBatchRequest,
+            User loginUser
+    );
 
 }

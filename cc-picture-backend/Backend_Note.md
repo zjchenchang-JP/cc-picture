@@ -1,5 +1,7 @@
 # 2025/05/31
+
 ## 如何实现图片上传和下载？
+
 图片本质上是一种 “小型” 文件，那么我要思考：将文件上传到哪里？从哪里下载？
 
 最简单的方式就是上传到后端项目所在的服务器，直接使用 Java 自带的文件读写 API 就能实现。但是，这种方式存在不少缺点，比如：
@@ -12,22 +14,28 @@
 
 - 不利于管理：只能通过一些文件管理器进行简单的管理操作，但是缺乏数据处理、流量控制等多种高级能力。
 
-因此，除了存储一些需要清理的临时文件之外，通常不会将用户上传并保存的文件（比如用户头像和图片）直接上传到服务器，而是更推荐使用专业的第三方存储服务，专业的工具做专业的事。其中，最常用的便是 对象存储
+因此，除了存储一些需要清理的临时文件之外，通常不会将用户上传并保存的文件（比如用户头像和图片）直接上传到服务器，而是更推荐使用专业的第三方存储服务，专业的工具做专业的事。其中，最常用的便是
+对象存储
 
 ### 什么是对象存储？
+
 对象存储是一种存储 海量文件 的 分布式 存储服务，具有高扩展性、低成本、可靠安全等优点。
 比如开源的对象存储服务 MinIO，还有商业版的云服务，像亚马逊 S3（Amazon S3）、阿里云对象存储（OSS）、腾讯云对象存储（COS）等等
 
 ### 本项目採用 设计方案
+
 创建图片其实包括了 2 个过程：上传图片文件 + 补充图片信息并保存到数据库中
 
 有 2 种常见的处理方式：
 
 - 1）先上传再提交数据：用户直接上传图片，系统生成图片的存储 URL；然后在用户填写其他相关信息并提交后，才保存图片记录到数据库中。
 
-- 2）上传图片时直接保存记录：在用户上传图片后，系统立即生成图片的完整数据记录（包括图片 URL 和其他元信息），无需等待用户点击提交，图片信息就立刻存入了数据库中。之后用户再填写其他图片信息，相当于编辑了已有图片记录的信息。
+- 2）上传图片时直接保存记录：在用户上传图片后，系统立即生成图片的完整数据记录（包括图片 URL
+  和其他元信息），无需等待用户点击提交，图片信息就立刻存入了数据库中。之后用户再填写其他图片信息，相当于编辑了已有图片记录的信息。
 
-方案 1 的优点是流程简单，但缺点是如果用户不提交，图片会残留在存储中，导致空间浪费；方案 2 则可以理解为保存了 “图片草稿”，即使用户不填写任何额外信息，也能找到之前的创建记录。
+方案 1 的优点是流程简单，但缺点是如果用户不提交，图片会残留在存储中，导致空间浪费；方案 2 则可以理解为保存了
+“图片草稿”，即使用户不填写任何额外信息，也能找到之前的创建记录。
+
 ```markdown
 为什么图片先存到服务器还会浪费空间？存到服务器和存到数据库有什么区别？
 
@@ -48,6 +56,7 @@
 方案1：你把衣服放进柜子，但没在登记本上写下来 → 你忘了这衣服，衣服占用柜子空间但找不到
 方案2：你把衣服放进柜子，同时在登记本上写好 → 你总能找到这衣服，还能补全信息
 ```
+
 ```markdown
 ---
 ## 两个不同的"存储"
@@ -62,6 +71,7 @@
 ## 方案1为什么浪费空间？
 
 ```
+
 用户上传图片
 ↓
 图片文件存到服务器磁盘 ✓（占用物理空间）
@@ -71,6 +81,7 @@
 用户【不点提交】，直接离开页面 ✗
 ↓
 结果：数据库里没有记录
+
 ```
 
 **问题：**
@@ -87,18 +98,22 @@
 
 ### 方案1（先上传后提交）
 ```
+
 你把书放到书架上（存到服务器）
 但没在登记本上写你的名字（没存数据库）
 → 书占位置，但没人知道是谁的
 → 图书管理员不知道该不该删这本书
+
 ```
 
 ### 方案2（上传即保存）
 ```
+
 你把书放到书架上（存到服务器）
 同时在登记本上写你的名字（存数据库）
 → 书有记录，管理员知道这是你的
 → 即使你没填完书评，管理员也能管理这本书
+
 ```
 ---
 ## 总结
@@ -109,14 +124,17 @@
 方案1的问题是：图片占空间了，但系统"不记得"它，所以叫浪费。。
 ```
 
-在我们的系统中，由于图片是核心资源，所以此处选择方案 2。 便于对图片进行溯源，还可以对图片上传做一些限制 —— 比如发现用户上传资源过多，就禁止上传
+在我们的系统中，由于图片是核心资源，所以此处选择方案 2。 便于对图片进行溯源，还可以对图片上传做一些限制 ——
+比如发现用户上传资源过多，就禁止上传
 
 ---
 
 # 2025/06/01
+
 ## uploadPicture 方法详解
 
 ### 方法流程
+
 ```
 用户上传图片 → MultipartFile
     ↓
@@ -160,27 +178,38 @@
 | 资源清理 | 临时文件用完即删，不会永久占用应用服务器空间 |
 
 **关键代码：**
+
 ```java
 // 创建临时文件
-file = File.createTempFile(uploadPath, null);
+file =File.
+
+createTempFile(uploadPath, null);
 
 // 将上传文件内容写入临时文件
-multipartFile.transferTo(file);
+multipartFile.
+
+transferTo(file);
 
 // 使用临时文件上传到 COS
-cosManager.putPictureObject(uploadPath, file);
+cosManager.
+
+putPictureObject(uploadPath, file);
 
 // 无论成功失败，都删除临时文件
-this.deleteTempFile(file); // 在 finally 块中
+this.
+
+deleteTempFile(file); // 在 finally 块中
 ```
 
 **临时文件生命周期：**
+
 ```
 创建 → 写入数据 → 上传到 COS → 删除
 ```
 
 **打个比方：**
 就像你收到了一封信（MultipartFile）：
+
 1. 你需要把这封信的内容抄到一张新纸上（创建临时 File）
 2. 把这张纸交给快递员（上传到 COS）
 3. 快递员拿走后，你把这张纸撕碎（删除临时文件）
@@ -188,11 +217,12 @@ this.deleteTempFile(file); // 在 finally 块中
 **为什么不能直接把原件给快递员？** → 因为快递员只接受你抄写好的格式（File 对象）。
 
 ### 总结
-| 问题 | 答案 |
-|------|------|
+
+| 问题        | 答案                                     |
+|-----------|----------------------------------------|
 | 为什么要临时文件？ | COS SDK 需要 File 对象，不能直接用 MultipartFile |
-| 为什么最后要删除？ | 临时文件只在传递数据时需要，上传后就没用了 |
-| 不删除会怎样？ | 磁盘空间会被占满，最终服务器崩溃 |
+| 为什么最后要删除？ | 临时文件只在传递数据时需要，上传后就没用了                  |
+| 不删除会怎样？   | 磁盘空间会被占满，最终服务器崩溃                       |
 
 ---
 
@@ -201,11 +231,13 @@ this.deleteTempFile(file); // 在 finally 块中
 ### 方案1：先上传再提交（像「先占座，后点菜」）
 
 **流程：**
+
 1. 用户上传图片 → 图片先存到服务器，得到一个地址
 2. 用户填写其他信息（标题、描述等）
 3. 用户点击「提交」按钮 → 这时才在数据库中创建图片记录
 
 **通俗理解：**
+
 - 就像你先去餐厅占了个座位（上传图片），但还没点菜
 - 如果你不点菜就直接走了（不点提交），座位就白占了
 - 需要定期清理这些"占座但不点菜"的图片
@@ -213,21 +245,23 @@ this.deleteTempFile(file); // 在 finally 块中
 ### 方案2：上传即保存（像「拍照即存相册」）
 
 **流程：**
+
 1. 用户上传图片 → **立刻**在数据库创建记录，图片URL直接存入
 2. 用户填写其他信息 → 相当于在"编辑"已保存的图片信息
 
 **通俗理解：**
+
 - 就像手机拍完照，照片立刻存入相册
 - 之后你可以给照片加标签、写备注（编辑信息）
 - 但照片本身已经稳稳地保存了，不会丢
 
 ### 核心区别
 
-| 对比项 | 方案1（先上传后提交） | 方案2（上传即保存） |
-|--------|---------------------|-------------------|
-| 数据库写入时机 | 用户点提交后 | 图片上传完成时 |
-| 用户不提交会怎样 | 图片浪费占用空间 | 图片已保存，只是信息不完整 |
-| 后续操作 | 创建新记录 | 编辑已有记录 |
+| 对比项      | 方案1（先上传后提交） | 方案2（上传即保存）    |
+|----------|-------------|---------------|
+| 数据库写入时机  | 用户点提交后      | 图片上传完成时       |
+| 用户不提交会怎样 | 图片浪费占用空间    | 图片已保存，只是信息不完整 |
+| 后续操作     | 创建新记录       | 编辑已有记录        |
 
 **简单说：方案1是"暂存"，方案2是"直接存"**
 
@@ -241,10 +275,13 @@ this.deleteTempFile(file); // 在 finally 块中
 
 ```java
 UploadPictureResult uploadPictureResult = fileManager.uploadPicture(multipartFile, uploadPathPrefix);
-ThrowUtils.throwIf(uploadPictureResult == null, ErrorCode.SYSTEM_ERROR, "图片上传失败");
+ThrowUtils.
+
+throwIf(uploadPictureResult ==null, ErrorCode.SYSTEM_ERROR, "图片上传失败");
 ```
 
 **原因：防御性编程**
+
 - 虽然 `FileManager.uploadPicture()` 正常返回时不会返回 null（失败会抛异常）
 - 但如果未来代码变更，可能引入 bug
 - 符合防御性编程原则
@@ -255,12 +292,13 @@ ThrowUtils.throwIf(uploadPictureResult == null, ErrorCode.SYSTEM_ERROR, "图片�
 
 #### PictureServiceImpl.java
 
-| 位置 | 日志类型 | 记录内容 |
-|------|---------|---------|
-| 方法入口 | info | 用户ID、pictureId、文件名 |
-| 方法出口（成功） | info | 图片ID、URL、用户ID |
+| 位置       | 日志类型 | 记录内容               |
+|----------|------|--------------------|
+| 方法入口     | info | 用户ID、pictureId、文件名 |
+| 方法出口（成功） | info | 图片ID、URL、用户ID      |
 
 ```java
+
 @Override
 public PictureVO uploadPicture(MultipartFile multipartFile, PictureUploadRequest pictureUploadRequest, User loginUser) {
     log.info("开始上传图片，用户ID = {}, pictureId = {}, 文件名 = {}",
@@ -277,11 +315,11 @@ public PictureVO uploadPicture(MultipartFile multipartFile, PictureUploadRequest
 
 #### FileManager.java
 
-| 位置 | 日志类型 | 记录内容 |
-|------|---------|---------|
-| 方法入口 | info | 文件名、大小、路径前缀 |
-| COS上传成功 | info | 路径、耗时 |
-| COS上传失败 | error | 路径、异常信息 |
+| 位置      | 日志类型  | 记录内容        |
+|---------|-------|-------------|
+| 方法入口    | info  | 文件名、大小、路径前缀 |
+| COS上传成功 | info  | 路径、耗时       |
+| COS上传失败 | error | 路径、异常信息     |
 
 ```java
 public UploadPictureResult uploadPicture(MultipartFile multipartFile, String uploadPathPrefix) {
@@ -312,30 +350,35 @@ public UploadPictureResult uploadPicture(MultipartFile multipartFile, String upl
 ## @RequestPart 注解详解
 
 ### 作用
+
 `@RequestPart("file")` 是 Spring MVC 用于接收 **multipart/form-data** 类型请求的注解。
 
-| 方面 | 说明 |
-|------|------|
-| **用途** | 处理文件上传请求（multipart/form-data） |
-| **"file"** | 绑定请求中 name="file" 的部分 |
-| **绑定对象** | 通常绑定到 `MultipartFile` 类型 |
+| 方面         | 说明                            |
+|------------|-------------------------------|
+| **用途**     | 处理文件上传请求（multipart/form-data） |
+| **"file"** | 绑定请求中 name="file" 的部分         |
+| **绑定对象**   | 通常绑定到 `MultipartFile` 类型      |
 
 ### 与 @RequestParam 的区别
 
 ```java
 // @RequestParam - 用于普通表单参数
 @PostMapping("/submit")
-public void submit(@RequestParam("username") String username) { }
+public void submit(@RequestParam("username") String username) {
+}
 
 // @RequestPart - 用于文件上传
 @PostMapping("/upload")
-public void upload(@RequestPart("file") MultipartFile file) { }
+public void upload(@RequestPart("file") MultipartFile file) {
+}
 ```
 
 ### 前后端对应关系
 
 **前端（HTML/JS）：**
+
 ```html
+
 <form action="/upload" method="post" enctype="multipart/form-data">
     <!-- name="file" 与后端注解中的 "file" 对应 -->
     <input type="file" name="file">
@@ -344,7 +387,9 @@ public void upload(@RequestPart("file") MultipartFile file) { }
 ```
 
 **后端（Java）：**
+
 ```java
+
 @PostMapping("/upload")
 public BaseResponse<String> upload(@RequestPart("file") MultipartFile multipartFile) {
     // 处理文件上传
@@ -352,41 +397,48 @@ public BaseResponse<String> upload(@RequestPart("file") MultipartFile multipartF
 ```
 
 ### 简单说
+
 - 前端发送：`name="file"` 的文件字段
 - 后端接收：`@RequestPart("file")` 绑定这个字段
 
 ---
+
 ## 性能优化
+
 ### 当前项目文件上传 会先在本地创建临时文件。如果不需要对文件进行额外的处理、想进一步提高性能，可以直接用流的方式将请求中的文件上传到 COS
+
 ```java
 // 上传文件  
-public static String uploadToCOS(MultipartFile multipartFile, String bucketName, String key) throws Exception {  
+public static String uploadToCOS(MultipartFile multipartFile, String bucketName, String key) throws Exception {
     // 创建 COS 客户端  
-    COSClient cosClient = createCOSClient();  
-  
-    try (InputStream inputStream = multipartFile.getInputStream()) {  
+    COSClient cosClient = createCOSClient();
+
+    try (InputStream inputStream = multipartFile.getInputStream()) {
         // 元信息配置  
-        ObjectMetadata metadata = new ObjectMetadata();  
-        metadata.setContentLength(multipartFile.getSize());  
-        metadata.setContentType(multipartFile.getContentType());  
-  
+        ObjectMetadata metadata = new ObjectMetadata();
+        metadata.setContentLength(multipartFile.getSize());
+        metadata.setContentType(multipartFile.getContentType());
+
         // 创建上传请求  
-        PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, key, inputStream, metadata);  
-  
+        PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, key, inputStream, metadata);
+
         // 上传文件  
-        cosClient.putObject(putObjectRequest);  
-  
+        cosClient.putObject(putObjectRequest);
+
         // 生成访问链接  
-        return "https://" + bucketName + ".cos." + cosClient.getClientConfig().getRegion().getRegionName()  
-               + ".myqcloud.com/" + key;  
-    } finally {  
-        cosClient.shutdown();  
-    }  
+        return "https://" + bucketName + ".cos." + cosClient.getClientConfig().getRegion().getRegionName()
+                + ".myqcloud.com/" + key;
+    } finally {
+        cosClient.shutdown();
+    }
 }
 
 ```
+
 ---
+
 # 2026/06/03
+
 ## `getPictureVOById` 和 `getPictureById` 这两个方法是否有必要拆分。
 
 ```java
@@ -409,14 +461,17 @@ public BaseResponse<Picture> getPictureById(long id, HttpServletRequest request)
     return ResultUtils.success(picture);
 }
 ```
+
 1. PictureVO 比 Picture 信息更丰富，为什么管理员反而要用信息更少的 Picture？
 2. 两个方法是否有必要拆分？
 
 关键点：
+
 - **Picture** 是实体类，包含数据库所有字段（包括一些敏感信息如 userId）
 - **PictureVO** 是视图类，是对外展示的，可能过滤了一些敏感字段
 
 但实际上管理员需要看到 Picture 实体类的原因：
+
 1. **管理需求**：管理员可能需要看到原始的数据库字段，比如 userId、创建时间、编辑时间等
 2. **调试排查**：管理员排查问题时需要看到完整的原始数据
 3. **编辑操作**：管理员编辑图片时需要获取完整的实体信息
@@ -424,17 +479,18 @@ public BaseResponse<Picture> getPictureById(long id, HttpServletRequest request)
 而普通只需要看到 PictureVO（脱敏/简化后的信息）。
 
 所以拆分是有必要的，但理由不是因为 PictureVO 比 Picture 信息多，而是因为：
+
 - **权限控制不同**：普通 vs 管理员
 - **返回数据不同**：VO 是给前端的，实体是给管理后台的
 - **用途不同**：展示 vs 管理
 
 ## 两个方法的区别
 
-| | `getPictureVOById` | `getPictureById` |
-|---|---|---|
-| **权限** | 所有 | 仅管理员 |
-| **返回类型** | `PictureVO`（视图类） | `Picture`（实体类） |
-| **用途** | 前台展示 | 后台管理/编辑 |
+|          | `getPictureVOById` | `getPictureById` |
+|----------|--------------------|------------------|
+| **权限**   | 所有                 | 仅管理员             |
+| **返回类型** | `PictureVO`（视图类）   | `Picture`（实体类）   |
+| **用途**   | 前台展示               | 后台管理/编辑          |
 
 ## 为什么管理员需要 Picture 实体类？
 
@@ -449,6 +505,7 @@ private String tags;        // JSON 字符串（原始格式，编辑时需要�
 ```
 
 **举个例子：**
+
 - **普通**访问图片详情 → `getPictureVOById` → 看到展示页面，tags 已经解析成 `List<String>`
 - **管理员**编辑图片 → `getPictureById` → 拿到原始数据回填到编辑表单
 
@@ -458,16 +515,21 @@ private String tags;        // JSON 字符串（原始格式，编辑时需要�
 前台看图片 → 用 VO（展示，脱敏，格式化好）
 后台管理员管图片 → 用实体（编辑，原始数据完整）
 ```
+
 **拆分的核心是权限和数据用途不同，不是信息量的多少。**不同，不是信息量的多少。**
+
 ```markdown
 getPictureVOById → 所有可访问（前台展示）
-getPictureById   → 仅管理员可访问（后台管理）
+getPictureById → 仅管理员可访问（后台管理）
 ```
 
 ---
+
 ## @TableField(typeHandler = JacksonTypeHandler.class)  注解
+
 这是 MyBatis-Plus 的注解，用于处理 Java 对象与数据库字段之间的类型转换。
 让 MyBatis-Plus 在**读写数据库时自动进行 JSON 转换**。
+
 ### 工作流程
 
 ```
@@ -480,67 +542,85 @@ Java 侧:  List<String> tags = ["风景", "自然", "山水"]
 
 ### 对比：加与不加的区别
 
-| 场景 | 不加 typeHandler | 加了 typeHandler |
-|------|----------------|----------------|
-| **实体类字段类型** | `String`（必须手动存 JSON 字符串） | `List<String>`（直接 Java 类型） |
-| **写入数据库** | 需要手动 `JSONUtil.toJsonStr(tags)` | **自动**序列化为 JSON |
-| **读取数据库** | 需要手动 `JSONUtil.toList(tags, String.class)` | **自动**反序列化为 List |
-| **objToVo / voToObj** | 需要手动转换 tags 类型 | 不需要，类型一致 |
+| 场景                    | 不加 typeHandler                             | 加了 typeHandler             |
+|-----------------------|--------------------------------------------|----------------------------|
+| **实体类字段类型**           | `String`（必须手动存 JSON 字符串）                   | `List<String>`（直接 Java 类型） |
+| **写入数据库**             | 需要手动 `JSONUtil.toJsonStr(tags)`            | **自动**序列化为 JSON            |
+| **读取数据库**             | 需要手动 `JSONUtil.toList(tags, String.class)` | **自动**反序列化为 List           |
+| **objToVo / voToObj** | 需要手动转换 tags 类型                             | 不需要，类型一致                   |
 
 ### 代码对比
 
 **不加 typeHandler（当前写法）：**
+
 ```java
 // Picture 实体
 private String tags;  // String 类型
 
 // 写入时手动转
-picture.setTags(JSONUtil.toJsonStr(pictureUpdateRequest.getTags()));
+picture.
+
+setTags(JSONUtil.toJsonStr(pictureUpdateRequest.getTags()));
 
 // 读取时手动转
-pictureVO.setTags(JSONUtil.toList(picture.getTags(), String.class));
+        pictureVO.
+
+setTags(JSONUtil.toList(picture.getTags(),String.class));
 ```
 
 **加了 typeHandler：**
+
 ```java
 // Picture 实体
 @TableField(typeHandler = JacksonTypeHandler.class)
 private List<String> tags;  // 直接 List 类型
 
 // 写入时直接
-picture.setTags(pictureUpdateRequest.getTags());  // 自动转 JSON
+picture.
+
+setTags(pictureUpdateRequest.getTags());  // 自动转 JSON
 
 // 读取时直接
-pictureVO.setTags(picture.getTags());  // 自动转 List
+        pictureVO.
+
+setTags(picture.getTags());  // 自动转 List
 // 甚至不需要 objToVo 中手动转换了
 ```
+
 **一个注解，省去所有手动 JSON 转换的代码。** MyBatis-Plus 帮你自动处理 Java 对象和 JSON 字符串之间的互转。串之间的互转。
 
 ---
 
 ## 其他相关注解
+
 ### 1. EnumTypeHandler（存枚举名称字符串）
 
 **不使用 typeHandler（手动处理）：**
+
 ```java
 // 实体类字段必须是 String
 private String picFormat;
 
 // 写入时手动转换
-picture.setPicFormat(PictureFormat.JPEG.name());  // 手动调用 name()
+picture.
+
+setPicFormat(PictureFormat.JPEG.name());  // 手动调用 name()
 
 // 读取时手动转换
 PictureFormat format = PictureFormat.valueOf(picture.getPicFormat());  // 手动解析
 ```
 
 **使用 EnumTypeHandler（自动处理）：**
+
 ```java
 // 实体类
 @TableField(typeHandler = EnumTypeHandler.class)
 private PictureFormat picFormat;
 
 // 写入时直接赋值
-picture.setPicFormat(PictureFormat.JPEG);  // 自动存为 "JPEG"
+picture.
+
+setPicFormat(PictureFormat.JPEG);  // 自动存为 "JPEG"
 
 // 读取时直接使用
 PictureFormat format = picture.getPicFormat();  // 自动转为枚举
@@ -555,25 +635,31 @@ PictureFormat format = picture.getPicFormat();  // 自动转为枚举
 ### 2. EnumOrdinalTypeHandler（存枚举序号）
 
 **不使用 typeHandler（手动处理）：**
+
 ```java
 // 实体类字段必须是 int
 private Integer picFormat;
 
 // 写入时手动转换
-picture.setPicFormat(PictureFormat.JPEG.ordinal());  // 手动调用 ordinal()
+picture.
+
+setPicFormat(PictureFormat.JPEG.ordinal());  // 手动调用 ordinal()
 
 // 读取时手动转换
 PictureFormat format = PictureFormat.values()[picture.getPicFormat()];  // 手动解析
 ```
 
 **使用 EnumOrdinalTypeHandler（自动处理）：**
+
 ```java
 // 实体类
 @TableField(typeHandler = EnumOrdinalTypeHandler.class)
 private PictureFormat picFormat;
 
 // 写入时直接赋值
-picture.setPicFormat(PictureFormat.JPEG);  // 自动存为 0
+picture.
+
+setPicFormat(PictureFormat.JPEG);  // 自动存为 0
 
 // 读取时直接使用
 PictureFormat format = picture.getPicFormat();  // 自动转为枚举
@@ -597,6 +683,7 @@ EnumOrdinalTypeHandler → 数据库存 0         （不可读，枚举顺序变
 ### 3. DateTypeHandler
 
 **不使用 typeHandler（MyBatis 自动处理，通常不需要手动指定）：**
+
 ```java
 // 实体类（无需注解，自动映射）
 private Date createTime;
@@ -608,25 +695,34 @@ private Date createTime;
 **需要自定义格式时（数据库存的是字符串格式的日期）：**
 
 不使用 typeHandler（手动处理）：
+
 ```java
 // 实体类字段必须是 String 
 //  varchar，存的值是 "2026-06-03 14:30:00"
 private String createTime;
 
 // 写入时手动格式化
-picture.setCreateTime(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date()));
+picture.
+
+setCreateTime(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").
+
+format(new Date()));
 
 // 读取时手动解析
 Date date = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse(picture.getCreateTime());
 ```
 
 使用自定义 typeHandler（自动处理）：
+
 ```java
+
 @TableField(typeHandler = DateStringTypeHandler.class)
 private Date createTime;
 
 // 写入时直接赋值
-picture.setCreateTime(new Date());  // 自动转为 "2026-06-03 14:30:00"
+picture.
+
+setCreateTime(new Date());  // 自动转为 "2026-06-03 14:30:00"
 
 // 读取时直接使用
 Date time = picture.getCreateTime();  // 自动转为 Date
@@ -640,37 +736,41 @@ Date time = picture.getCreateTime();  // 自动转为 Date
 
 ### 总结
 
-| TypeHandler | 不用时 Java 字段 | 使用后 Java 字段 | 数据库存储 | 省去的手动操作 |
-|-------------|----------------|----------------|-----------|--------------|
-| `EnumTypeHandler` | `String` | `PictureFormat`（枚举） | `"JPEG"` | `.name()` / `valueOf()` |
-| `EnumOrdinalTypeHandler` | `Integer` | `PictureFormat`（枚举） | `0` | `.ordinal()` / `values()[n]` |
-| 自定义 `DateStringTypeHandler` | `String` | `Date` | `"2026-06-03 14:30:00"` | `SimpleDateFormat` 格式化/解析 |
+| TypeHandler                 | 不用时 Java 字段 | 使用后 Java 字段         | 数据库存储                   | 省去的手动操作                      |
+|-----------------------------|-------------|---------------------|-------------------------|------------------------------|
+| `EnumTypeHandler`           | `String`    | `PictureFormat`（枚举） | `"JPEG"`                | `.name()` / `valueOf()`      |
+| `EnumOrdinalTypeHandler`    | `Integer`   | `PictureFormat`（枚举） | `0`                     | `.ordinal()` / `values()[n]` |
+| 自定义 `DateStringTypeHandler` | `String`    | `Date`              | `"2026-06-03 14:30:00"` | `SimpleDateFormat` 格式化/解析    |
 
 **核心：不用时字段必须是基础类型 + 手动转换，用了之后字段直接目标类型 + 自动转换。****
 
 ---
-## 
+
+##  
+
 ```java
 /**
-     * 获取预置标签和分类
-     * @return 预设的固定数据
-     */
-    @GetMapping("/tag_category")
-    public BaseResponse<PictureTagCategory> listPictureTagCategory() {
-        // 要支持用户根据标签和分类搜索图片，我们可以给用户列举一些常用的标签和分类，便于筛选
-        // 在项目规模不大的时候，我们没必要将标签和分类单独用数据表来维护了
-        // 前期直接在 PictureController 中写一个接口，返回预设的固定数据即可
-        // TODO
-        // 随着系统规模和数据不断扩大，可以再改为使用配置中心或数据库动态管理这些数据，或者通过定时任务计算出热门的图片分类和标签
-        PictureTagCategory pictureTagCategory = new PictureTagCategory();
-        List<String> tagList = Arrays.asList("热门", "搞笑", "生活", "高清", "艺术", "校园", "背景", "简历", "创意");
-        List<String> categoryList = Arrays.asList("模板", "电商", "表情包", "素材", "海报");
-        pictureTagCategory.setTagList(tagList);
-        pictureTagCategory.setCategoryList(categoryList);
-        return ResultUtils.success(pictureTagCategory);
-    }
+ * 获取预置标签和分类
+ * @return 预设的固定数据
+ */
+@GetMapping("/tag_category")
+public BaseResponse<PictureTagCategory> listPictureTagCategory() {
+    // 要支持用户根据标签和分类搜索图片，我们可以给用户列举一些常用的标签和分类，便于筛选
+    // 在项目规模不大的时候，我们没必要将标签和分类单独用数据表来维护了
+    // 前期直接在 PictureController 中写一个接口，返回预设的固定数据即可
+    // TODO
+    // 随着系统规模和数据不断扩大，可以再改为使用配置中心或数据库动态管理这些数据，或者通过定时任务计算出热门的图片分类和标签
+    PictureTagCategory pictureTagCategory = new PictureTagCategory();
+    List<String> tagList = Arrays.asList("热门", "搞笑", "生活", "高清", "艺术", "校园", "背景", "简历", "创意");
+    List<String> categoryList = Arrays.asList("模板", "电商", "表情包", "素材", "海报");
+    pictureTagCategory.setTagList(tagList);
+    pictureTagCategory.setCategoryList(categoryList);
+    return ResultUtils.success(pictureTagCategory);
+}
 ```
+
 注释提到的三种扩展方案的示例代码：
+
 1. 配置中心动态管理
 2. 数据库动态管理
 3. 定时任务计算热门标签/分类
@@ -688,6 +788,7 @@ picture:
 ```
 
 ```java
+
 @RestController
 @RequestMapping("/picture")
 @RefreshScope  // Nacos 配置变更时自动刷新
@@ -716,10 +817,11 @@ public class PictureController {
 
 ```sql
 -- 建表
-CREATE TABLE picture_tag_category (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    type VARCHAR(20) NOT NULL COMMENT '类型：tag/category',
-    value VARCHAR(100) NOT NULL COMMENT '标签或分类的值',
+CREATE TABLE picture_tag_category
+(
+    id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+    type       VARCHAR(20)  NOT NULL COMMENT '类型：tag/category',
+    value      VARCHAR(100) NOT NULL COMMENT '标签或分类的值',
     sort_order INT DEFAULT 0 COMMENT '排序'
 );
 ```
@@ -737,7 +839,8 @@ public class PictureTagCategoryEntity {
 }
 
 // Mapper
-public interface PictureTagCategoryMapper extends BaseMapper<PictureTagCategoryEntity> {}
+public interface PictureTagCategoryMapper extends BaseMapper<PictureTagCategoryEntity> {
+}
 
 // Controller
 @GetMapping("/tag_category")
@@ -766,6 +869,7 @@ public BaseResponse<PictureTagCategory> listPictureTagCategory() {
 ## 方案3：定时任务计算热门标签/分类
 
 ```java
+
 @Component
 @Slf4j
 public class HotTagCategoryTask {
@@ -853,17 +957,19 @@ public BaseResponse<PictureTagCategory> listPictureTagCategory() {
 
 ## 三种方案对比
 
-| 方案 | 适用阶段 | 修改方式 | 实时性 | 复杂度 |
-|------|---------|---------|--------|--------|
-| **硬编码**（当前） | 项目初期 | 改代码重新部署 | 无 | 最低 |
-| **配置中心** | 中期 | Nacos 控制台改配置 | 准实时 | 低 |
-| **数据库** | 中期 | 后台管理界面增删改 | 实时 | 中 |
-| **定时任务** | 后期 | 自动统计，无需人工 | 每天更新 | 高 |
+| 方案          | 适用阶段 | 修改方式         | 实时性  | 复杂度 |
+|-------------|------|--------------|------|-----|
+| **硬编码**（当前） | 项目初期 | 改代码重新部署      | 无    | 最低  |
+| **配置中心**    | 中期   | Nacos 控制台改配置 | 准实时  | 低   |
+| **数据库**     | 中期   | 后台管理界面增删改    | 实时   | 中   |
+| **定时任务**    | 后期   | 自动统计，无需人工    | 每天更新 | 高   |
 
 随着系统规模扩大，可以逐步演进：**硬编码 → 配置中心 → 数据库 → 定时任务**，甚至组合使用。时任务**，甚至组合使用。
 
 ## 集群部署 定时任务需要分布式锁
+
 如果服务部署了多个实例（集群），多个实例会同时执行同一个定时任务，导致：
+
 - 重复计算
 - 重复写入 Redis
 - 浪费资源
@@ -877,7 +983,9 @@ public BaseResponse<PictureTagCategory> listPictureTagCategory() {
 实例2: 凌晨2点触发定时任务 → 查数据库 → 写Redis  ← 重复执行
 实例3: 凌晨2点触发定时任务 → 查数据库 → 写Redis  ← 重复执行
 ```
+
 ### 加了分布式锁后
+
 ```
 实例1: 凌晨2点获取锁成功 → 执行任务 → 释放锁
 实例2: 凌晨2点获取锁失败 → 跳过
@@ -886,16 +994,17 @@ public BaseResponse<PictureTagCategory> listPictureTagCategory() {
 
 ### 常分布式锁实现
 
-| 方案 | 适用场景 | 复杂度 |
-|------|---------|--------|
-| **Redis Redisson** | 最常用，Spring Boot 项目首选 | 低 |
-| **Redis SETNX** | 轻量级 | 低 |
-| **Zookeeper** | 强一致性要求高 | 高 |
-| **数据库锁** | 不想引入新中间件 | 中 |
+| 方案                 | 适用场景                 | 复杂度 |
+|--------------------|----------------------|-----|
+| **Redis Redisson** | 最常用，Spring Boot 项目首选 | 低   |
+| **Redis SETNX**    | 轻量级                  | 低   |
+| **Zookeeper**      | 强一致性要求高              | 高   |
+| **数据库锁**           | 不想引入新中间件             | 中   |
 
 ### 以 Redisson 为例的代码
 
 ```java
+
 @Component
 @Slf4j
 public class HotTagCategoryTask {
@@ -981,10 +1090,10 @@ public class HotTagCategoryTask {
 
 ### 简单说
 
-| 场景 | 是否需要分布式锁 |
-|------|----------------|
-| 单机部署 | 不需要 |
-| 集群部署（多实例） | **必须加** |
+| 场景        | 是否需要分布式锁 |
+|-----------|----------|
+| 单机部署      | 不需要      |
+| 集群部署（多实例） | **必须加**  |
 
 **核心逻辑：多个实例抢同一把锁，抢到的执行，抢不到的跳过。**的跳过。**
 
@@ -993,6 +1102,7 @@ public class HotTagCategoryTask {
 ## 方案1：Zookeeper 分布式锁
 
 ```java
+
 @Component
 @Slf4j
 public class HotTagCategoryTask {
@@ -1045,7 +1155,9 @@ public class HotTagCategoryTask {
 ```
 
 **配置类：**
+
 ```java
+
 @Configuration
 public class ZookeeperConfig {
 
@@ -1066,6 +1178,7 @@ public class ZookeeperConfig {
 ```
 
 **application.yml：**
+
 ```yaml
 zookeeper:
   connect-string: localhost:2181
@@ -1078,9 +1191,11 @@ zookeeper:
 ### 方式一：唯一索引（推荐简单场景）
 
 **建表：**
+
 ```sql
-CREATE TABLE distributed_lock (
-    lock_key VARCHAR(100) PRIMARY KEY COMMENT '锁标识',
+CREATE TABLE distributed_lock
+(
+    lock_key    VARCHAR(100) PRIMARY KEY COMMENT '锁标识',
     lock_holder VARCHAR(100) COMMENT '持有者（实例标识）',
     expire_time BIGINT COMMENT '过期时间戳',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -1088,7 +1203,9 @@ CREATE TABLE distributed_lock (
 ```
 
 **获取锁和释放锁：**
+
 ```java
+
 @Component
 @Slf4j
 public class DatabaseLockManager {
@@ -1141,7 +1258,9 @@ public class DatabaseLockManager {
 ```
 
 **使用：**
+
 ```java
+
 @Component
 @Slf4j
 public class HotTagCategoryTask {
@@ -1177,6 +1296,7 @@ public class HotTagCategoryTask {
 ### 方式二：SELECT FOR UPDATE（行级悲观锁）
 
 ```java
+
 @Component
 @Slf4j
 public class HotTagCategoryTask {
@@ -1214,23 +1334,26 @@ public class HotTagCategoryTask {
 
 ## 四种分布式锁对比
 
-| 方案 | 实现复杂度 | 性能 | 可靠性 | 适用场景 |
-|------|-----------|------|--------|---------|
-| **Redis Redisson** | 低 | 高 | 高 | 最常用，Spring Boot 首选 |
-| **Redis SETNX** | 低 | 高 | 中 | 轻量级，不引入框架 |
-| **Zookeeper** | 高 | 中 | **最高**（强一致性） | 对一致性要求极高的场景 |
-| **数据库唯一索引** | 中 | **最低** | 中 | 不想引入新中间件的小项目 |
-| **数据库悲观锁** | 中 | **最低** | 中 | 已有数据库的项目临时方案 |
+| 方案                 | 实现复杂度 | 性能     | 可靠性          | 适用场景               |
+|--------------------|-------|--------|--------------|--------------------|
+| **Redis Redisson** | 低     | 高      | 高            | 最常用，Spring Boot 首选 |
+| **Redis SETNX**    | 低     | 高      | 中            | 轻量级，不引入框架          |
+| **Zookeeper**      | 高     | 中      | **最高**（强一致性） | 对一致性要求极高的场景        |
+| **数据库唯一索引**        | 中     | **最低** | 中            | 不想引入新中间件的小项目       |
+| **数据库悲观锁**         | 中     | **最低** | 中            | 已有数据库的项目临时方案       |
 
 **当前项目推荐**：Redis Redisson（简单高效），如果不想引入 Redis，数据库唯一索引方案即可。引入 Redis，用数据库唯一索引方案即可。
 
 ---
+
 # 2026/06/04
+
 ## 图片并发审核问题分析
 
 ### doPictureReview 方法是否存在权限中途被撤销的风险？
 
 执行时间线：
+
 ```
 请求1：管理员审核图片
     ↓
@@ -1252,47 +1375,62 @@ updateById 操作数据库 ✓
 ### 并发审核（更实际的风险）
 
 两个管理员同时审核同一张图片：
+
 ```
 管理员A：审核通过 → reviewStatus = 1
 管理员B：审核拒绝 → reviewStatus = 2（覆盖了A的结果）
 ```
 
 **影响评估：** 不涉及资金、库存等关键数据，只是最终审核状态以谁后执行为准，业务上可以接受。且已有重复审核校验能防住大部分情况：
+
 ```java
-if (oldPicture.getReviewStatus().equals(reviewStatus)) {
-    throw new BusinessException(ErrorCode.PARAMS_ERROR, "请勿重复审核");
+if(oldPicture.getReviewStatus().
+
+equals(reviewStatus)){
+        throw new
+
+BusinessException(ErrorCode.PARAMS_ERROR, "请勿重复审核");
 }
 ```
 
 ### 如果要加乐观锁，SQL 对比
 
 **不加乐观锁（当前）：**
+
 ```sql
-UPDATE picture SET reviewStatus = 1, reviewerId = 100, reviewTime = '2026-06-03'
+UPDATE picture
+SET reviewStatus = 1,
+    reviewerId   = 100,
+    reviewTime   = '2026-06-03'
 WHERE id = 123
 ```
 
 **加了乐观锁：**
+
 ```sql
-UPDATE picture SET reviewStatus = 1, reviewerId = 100, reviewTime = '2026-06-03'
-WHERE id = 123 AND reviewStatus = 0
+UPDATE picture
+SET reviewStatus = 1,
+    reviewerId   = 100,
+    reviewTime   = '2026-06-03'
+WHERE id = 123
+  AND reviewStatus = 0
 ```
 
 区别就是 WHERE 多了一个 `AND reviewStatus = 0`。如果被其他管理员改了，条件不匹配，更新行数为 0。
 
 ### 性能影响
 
-| 方式 | 额外开销 | 是否会阻塞等待 |
-|------|---------|---------------|
-| 乐观锁 | 多一个 WHERE 条件 | 不会 |
-| 悲观锁（SELECT FOR UPDATE） | 需要加行锁 | 会阻塞等待 |
+| 方式                     | 额外开销         | 是否会阻塞等待 |
+|------------------------|--------------|---------|
+| 乐观锁                    | 多一个 WHERE 条件 | 不会      |
+| 悲观锁（SELECT FOR UPDATE） | 需要加行锁        | 会阻塞等待   |
 
 ### 总结
 
-| 问题 | 答案 |
-|------|------|
-| 并发审核重要吗？ | 不重要，不涉及资金等关键数据 |
-| 需要加乐观锁吗？ | 当前项目不需要 |
+| 问题        | 答案                    |
+|-----------|-----------------------|
+| 并发审核重要吗？  | 不重要，不涉及资金等关键数据        |
+| 需要加乐观锁吗？  | 当前项目不需要               |
 | 乐观锁影响性能吗？ | 几乎不影响（多一个 WHERE 条件而已） |
 
 **当前项目保持现状就好。** 如果未来是订单审核、资金审核这类场景，才需要考虑乐观锁。
@@ -1300,17 +1438,25 @@ WHERE id = 123 AND reviewStatus = 0
 ### 如果要严格处理权限中途变更
 
 可以在执行操作前再校验一次：
+
 ```java
 // 二次校验权限（防止权限中途被撤销）
 User freshUser = userService.getById(loginUser.getId());
-if (!UserRoleEnum.ADMIN.getValue().equals(freshUser.getUserRole())) {
-    throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "权限已被撤销");
+if(!UserRoleEnum.ADMIN.
+
+getValue().
+
+equals(freshUser.getUserRole())){
+        throw new
+
+BusinessException(ErrorCode.NO_AUTH_ERROR, "权限已被撤销");
 }
 ```
 
 ---
 
 # 2026/06/06
+
 ## Manager 包：文件上传逻辑的模板方法模式演变
 
 ### FileManager 的两种上传方式（旧代码）
@@ -1318,25 +1464,26 @@ if (!UserRoleEnum.ADMIN.getValue().equals(freshUser.getUserRole())) {
 在重构之前，`FileManager` 类中存在两个上传方法，它们的核心流程完全一致，但实现细节不同：
 
 #### 方法1：本地文件上传 `uploadPicture(MultipartFile, String)`
+
 ```java
 public UploadPictureResult uploadPicture(MultipartFile multipartFile, String uploadPathPrefix) {
     // 1. 校验图片（本地文件）
     validPicture(multipartFile);
-    
+
     // 2. 生成上传路径
     String uuid = RandomUtil.randomString(16);
     String originFilename = multipartFile.getOriginalFilename();
     String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
-    
+
     File file = null;
     try {
         // 3. 创建临时文件
         file = File.createTempFile(uploadPath, null);
         multipartFile.transferTo(file);
-        
+
         // 4. 上传到COS
         PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, file);
-        
+
         // 5. 封装返回结果
         UploadPictureResult uploadPictureResult = new UploadPictureResult();
         // ... 设置各种属性 ...
@@ -1349,25 +1496,26 @@ public UploadPictureResult uploadPicture(MultipartFile multipartFile, String upl
 ```
 
 #### 方法2：URL上传 `uploadPictureByUrl(String, String)`
+
 ```java
 public UploadPictureResult uploadPictureByUrl(String fileUrl, String uploadPathPrefix) {
     // 1. 校验图片（URL方式校验）
     validPicture(fileUrl);
-    
+
     // 2. 生成上传路径（类似）
     String uuid = RandomUtil.randomString(16);
     String originFilename = FileUtil.mainName(fileUrl);
     String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
-    
+
     File tempFile = null;
     try {
         // 3. 创建临时文件
         tempFile = File.createTempFile(uploadPath, null);
         HttpUtil.downloadFile(fileUrl, tempFile);  // ← 不同点：从URL下载
-        
+
         // 4. 上传到COS（完全相同）
         PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, tempFile);
-        
+
         // 5. 封装返回结果（完全相同）
         UploadPictureResult uploadPictureResult = new UploadPictureResult();
         // ... 设置各种属性（相同代码）...
@@ -1383,14 +1531,14 @@ public UploadPictureResult uploadPictureByUrl(String fileUrl, String uploadPathP
 
 两个方法的流程**完全一致**，但存在**大量重复代码**：
 
-| 步骤 | 本地上传 | URL上传 | 是否相同 |
-|------|---------|---------|---------|
-| 1. 校验图片 | `validPicture(MultipartFile)` | `validPicture(String)` | ❌ 不同 |
-| 2. 生成路径 | 从 MultipartFile 获取 | 从 URL 获取 | ❌ 不同 |
-| 3. 创建临时文件 | `multipartFile.transferTo()` | `HttpUtil.downloadFile()` | ❌ 不同 |
-| 4. 上传COS | `cosManager.putPictureObject()` | `cosManager.putPictureObject()` | ✓ 相同 |
-| 5. 封装结果 | 相同代码 | 相同代码 | ✓ 相同 |
-| 6. 清理文件 | `deleteTempFile()` | `deleteTempFile()` | ✓ 相同 |
+| 步骤        | 本地上传                            | URL上传                           | 是否相同 |
+|-----------|---------------------------------|---------------------------------|------|
+| 1. 校验图片   | `validPicture(MultipartFile)`   | `validPicture(String)`          | ❌ 不同 |
+| 2. 生成路径   | 从 MultipartFile 获取              | 从 URL 获取                        | ❌ 不同 |
+| 3. 创建临时文件 | `multipartFile.transferTo()`    | `HttpUtil.downloadFile()`       | ❌ 不同 |
+| 4. 上传COS  | `cosManager.putPictureObject()` | `cosManager.putPictureObject()` | ✓ 相同 |
+| 5. 封装结果   | 相同代码                            | 相同代码                            | ✓ 相同 |
+| 6. 清理文件   | `deleteTempFile()`              | `deleteTempFile()`              | ✓ 相同 |
 
 **代码重复率超过60%**，这是典型的"流程相同、细节不同"场景。
 
@@ -1405,39 +1553,40 @@ public UploadPictureResult uploadPictureByUrl(String fileUrl, String uploadPathP
 #### 模板抽象类 `PictureUploadTemplate`
 
 ```java
+
 @Slf4j
 public abstract class PictureUploadTemplate {
-    
+
     @Resource
     protected CosManager cosManager;
-    
+
     @Resource
     protected CosClientConfig cosClientConfig;
-    
+
     /**
      * 模板方法：定义上传流程（final防止子类修改）
      */
     public final UploadPictureResult uploadPicture(Object inputSource, String uploadPathPrefix) {
         // 1. 校验图片（抽象方法，子类实现）
         validPicture(inputSource);
-        
+
         // 2. 图片上传地址（抽象方法，子类实现获取文件名）
         String uuid = RandomUtil.randomString(16);
         String originFilename = getOriginFilename(inputSource);
         String uploadFilename = String.format("%s_%s.%s", DateUtil.formatDate(new Date()), uuid, FileUtil.getSuffix(originFilename));
         String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
-        
+
         File file = null;
         try {
             // 3. 创建临时文件
             file = File.createTempFile(uploadPath, null);
             // 处理文件来源（抽象方法，子类实现）
             processFile(inputSource, file);
-            
+
             // 4. 上传图片到对象存储
             PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, file);
             ImageInfo imageInfo = putObjectResult.getCiUploadResult().getOriginalInfo().getImageInfo();
-            
+
             // 5. 封装返回结果（通用逻辑）
             return buildResult(originFilename, file, uploadPath, imageInfo);
         } catch (Exception e) {
@@ -1448,26 +1597,26 @@ public abstract class PictureUploadTemplate {
             deleteTempFile(file);
         }
     }
-    
+
     // ===== 三个抽象方法，由子类实现 =====
-    
+
     /**
      * 校验输入源（本地文件或 URL）
      */
     protected abstract void validPicture(Object inputSource);
-    
+
     /**
      * 获取输入源的原始文件名
      */
     protected abstract String getOriginFilename(Object inputSource);
-    
+
     /**
      * 处理输入源并生成本地临时文件
      */
     protected abstract void processFile(Object inputSource, File file) throws Exception;
-    
+
     // ===== 通用私有方法 =====
-    
+
     private UploadPictureResult buildResult(String originFilename, File file, String uploadPath, ImageInfo imageInfo) {
         UploadPictureResult uploadPictureResult = new UploadPictureResult();
         int picWidth = imageInfo.getWidth();
@@ -1482,7 +1631,7 @@ public abstract class PictureUploadTemplate {
         uploadPictureResult.setUrl(cosClientConfig.getHost() + "/" + uploadPath);
         return uploadPictureResult;
     }
-    
+
     public void deleteTempFile(File file) {
         if (file == null) {
             return;
@@ -1500,31 +1649,32 @@ public abstract class PictureUploadTemplate {
 #### 子类实现1：FilePictureUpload（本地文件上传）
 
 ```java
+
 @Service
 public class FilePictureUpload extends PictureUploadTemplate {
-    
+
     @Override
     protected void validPicture(Object inputSource) {
         MultipartFile multipartFile = (MultipartFile) inputSource;
         ThrowUtils.throwIf(multipartFile == null, ErrorCode.PARAMS_ERROR, "文件不能为空");
-        
+
         // 1. 校验文件大小
         long fileSize = multipartFile.getSize();
         final long ONE_M = 1024 * 1024L;
         ThrowUtils.throwIf(fileSize > 2 * ONE_M, ErrorCode.PARAMS_ERROR, "文件大小不能超过 2M");
-        
+
         // 2. 校验文件后缀
         String fileSuffix = FileUtil.getSuffix(multipartFile.getOriginalFilename());
         final List<String> ALLOW_FORMAT_LIST = Arrays.asList("jpeg", "jpg", "png", "webp");
         ThrowUtils.throwIf(!ALLOW_FORMAT_LIST.contains(fileSuffix), ErrorCode.PARAMS_ERROR, "文件类型错误");
     }
-    
+
     @Override
     protected String getOriginFilename(Object inputSource) {
         MultipartFile multipartFile = (MultipartFile) inputSource;
         return multipartFile.getOriginalFilename();
     }
-    
+
     @Override
     protected void processFile(Object inputSource, File file) throws Exception {
         MultipartFile multipartFile = (MultipartFile) inputSource;
@@ -1538,25 +1688,26 @@ public class FilePictureUpload extends PictureUploadTemplate {
 #### 子类实现2：UrlPictureUpload（URL上传）
 
 ```java
+
 @Service
 public class UrlPictureUpload extends PictureUploadTemplate {
-    
+
     @Override
     protected void validPicture(Object inputSource) {
         String fileUrl = (String) inputSource;
         ThrowUtils.throwIf(StrUtil.isBlank(fileUrl), ErrorCode.PARAMS_ERROR, "文件地址不能为空");
-        
+
         try {
             // 1. 校验url格式
             new URL(fileUrl);
         } catch (MalformedURLException e) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "URL格式不正确");
         }
-        
+
         // 2. 校验URL协议
         ThrowUtils.throwIf(!(fileUrl.startsWith("http://") || fileUrl.startsWith("https://")),
                 ErrorCode.PARAMS_ERROR, "仅支持 HTTP 或 HTTPS 协议的文件地址");
-        
+
         // 3. 发送 HEAD 请求验证文件
         HttpResponse response = null;
         try {
@@ -1564,7 +1715,7 @@ public class UrlPictureUpload extends PictureUploadTemplate {
             if (response.getStatus() != HttpStatus.HTTP_OK) {
                 return;
             }
-            
+
             // 4. 校验文件类型
             String contentType = response.header("Content-Type");
             if (StrUtil.isNotBlank(contentType)) {
@@ -1572,7 +1723,7 @@ public class UrlPictureUpload extends PictureUploadTemplate {
                 ThrowUtils.throwIf(!ALLOW_CONTENT_TYPES.contains(contentType.toLowerCase()),
                         ErrorCode.PARAMS_ERROR, "文件类型错误");
             }
-            
+
             // 5. 校验文件大小
             String contentLengthStr = response.header("Content-Length");
             if (StrUtil.isNotBlank(contentLengthStr)) {
@@ -1590,13 +1741,13 @@ public class UrlPictureUpload extends PictureUploadTemplate {
             }
         }
     }
-    
+
     @Override
     protected String getOriginFilename(Object inputSource) {
         String fileUrl = (String) inputSource;
         return FileUtil.mainName(fileUrl);
     }
-    
+
     @Override
     protected void processFile(Object inputSource, File file) throws Exception {
         String fileUrl = (String) inputSource;
@@ -1611,13 +1762,13 @@ public class UrlPictureUpload extends PictureUploadTemplate {
 
 #### 代码结构对比
 
-| 方面 | 旧代码（FileManager） | 新代码（模板方法模式） |
-|------|---------------------|---------------------|
-| **类数量** | 1个类 | 1个抽象类 + 2个子类 |
-| **重复代码** | 大量重复（60%+） | 几乎无重复 |
-| **扩展性** | 新增上传方式需修改现有类 | 新增上传方式只需新增子类 |
-| **可维护性** | 修改一处需要同步修改另一处 | 修改模板类自动应用到所有子类 |
-| **代码量** | ~270行 | 总计~250行，但结构更清晰 |
+| 方面       | 旧代码（FileManager） | 新代码（模板方法模式）    |
+|----------|------------------|----------------|
+| **类数量**  | 1个类              | 1个抽象类 + 2个子类   |
+| **重复代码** | 大量重复（60%+）       | 几乎无重复          |
+| **扩展性**  | 新增上传方式需修改现有类     | 新增上传方式只需新增子类   |
+| **可维护性** | 修改一处需要同步修改另一处    | 修改模板类自动应用到所有子类 |
+| **代码量**  | ~270行            | 总计~250行，但结构更清晰 |
 
 #### 职责划分
 
@@ -1640,7 +1791,9 @@ public class UrlPictureUpload extends PictureUploadTemplate {
 #### 使用方式对比
 
 **旧代码：**
+
 ```java
+
 @Resource
 private FileManager fileManager;
 
@@ -1652,7 +1805,9 @@ UploadPictureResult result2 = fileManager.uploadPictureByUrl(fileUrl, "/picture"
 ```
 
 **新代码：**
+
 ```java
+
 @Resource
 private FilePictureUpload filePictureUpload;
 
@@ -1681,10 +1836,10 @@ UploadPictureResult result2 = urlPictureUpload.uploadPicture(fileUrl, "/picture"
 
 #### 本项目中的应用
 
-| 场景 | 流程 | 差异点 |
-|------|------|--------|
-| 文件上传 | 校验→路径→临时文件→COS→结果→清理 | 校验方式、获取文件名、处理文件 |
-| （可扩展）支付流程 | 验证→扣款→通知 | 支付渠道、签名方式、回调处理 |
+| 场景        | 流程                   | 差异点             |
+|-----------|----------------------|-----------------|
+| 文件上传      | 校验→路径→临时文件→COS→结果→清理 | 校验方式、获取文件名、处理文件 |
+| （可扩展）支付流程 | 验证→扣款→通知             | 支付渠道、签名方式、回调处理  |
 
 #### 关键设计点
 
@@ -1698,21 +1853,22 @@ UploadPictureResult result2 = urlPictureUpload.uploadPicture(fileUrl, "/picture"
 如果要新增"Base64上传"方式，只需：
 
 ```java
+
 @Service
 public class Base64PictureUpload extends PictureUploadTemplate {
-    
+
     @Override
     protected void validPicture(Object inputSource) {
         String base64 = (String) inputSource;
         // 校验 Base64 格式
     }
-    
+
     @Override
     protected String getOriginFilename(Object inputSource) {
         // 从 Base64 中提取文件名
         return "base64_upload";
     }
-    
+
     @Override
     protected void processFile(Object inputSource, File file) throws Exception {
         String base64 = (String) inputSource;
@@ -1722,3 +1878,279 @@ public class Base64PictureUpload extends PictureUploadTemplate {
 ```
 
 无需修改任何现有代码，符合**开闭原则**（对扩展开放，对修改关闭）。
+
+# 2026/06/09
+
+● uploadPictureByBatch
+方法详解                                                                                                                                                                                            
+这个方法的核心功能是：从 Bing
+图片搜索批量抓取图片并上传到系统。                                                               
+流程图
+
+用户输入关键词 → 搜索 Bing 图片 → 解析 HTML 提取图片 URL → 循环上传每张图片
+
+---
+代码逐行解析
+
+```java
+public Integer uploadPictureByBatch(PictureUploadByBatchRequest pictureUploadByBatchRequest, User loginUser) {
+}
+```
+
+作用：批量上传图片，返回成功上传的数量
+
+---
+第1步：提取参数
+
+```java
+String searchText = pictureUploadByBatchRequest.getSearchText();  // 搜索关键词，如"风景"
+Integer count = pictureUploadByBatchRequest.getCount();            // 要上传的数量
+ThrowUtils.
+
+throwIf(count >30, ErrorCode.PARAMS_ERROR, "最多 30 条");  // 限制最多30条，防止滥用
+```
+
+---
+第2步：构造 Bing 搜索 URL
+
+String fetchUrl = String.format("https://cn.bing.com/images/async?q=%s&mmasync=1", searchText);
+
+示例：searchText = "风景"
+→ fetchUrl = "https://cn.bing.com/images/async?q=风景&mmasync=1"
+
+这是一个 Bing 图片搜索的异步接口，返回包含图片列表的 HTML。
+
+---
+第3步：用 Jsoup 抓取页面
+
+Document document;
+try {
+document = Jsoup.connect(fetchUrl).get(); // 发送 HTTP 请求，获取 HTML 文档
+} catch (IOException e) {
+log.error("获取页面失败", e);
+throw new BusinessException(ErrorCode.OPERATION_ERROR, "获取页面失败");
+}
+
+Jsoup 是一个 Java HTML 解析库，可以像 jQuery 一样操作 DOM。
+
+  ---
+第4步：定位图片元素
+
+Element div = document.getElementsByClass("dgControl").first(); // 找到 class="dgControl" 的 div
+if (ObjUtil.isNull(div)) {
+throw new BusinessException(ErrorCode.OPERATION_ERROR, "获取元素失败");
+}
+Elements imgElementList = div.select("img.mimg"); // 在该 div 下查找所有 class="mimg" 的 img 标签
+
+Bing 返回的 HTML 结构大致如下：
+  <div class="dgControl">
+      <img class="mimg" src="https://...1.jpg">
+      <img class="mimg" src="https://...2.jpg">
+      <img class="mimg" src="https://...3.jpg">
+      ...
+  </div>
+
+  ---
+第5步：循环上传每张图片
+
+int uploadCount = 0; // 成功上传计数器
+for (Element imgElement : imgElementList) { // 遍历每个 img 元素
+String fileUrl = imgElement.attr("src"); // 获取 src 属性（图片 URL）
+
+      if (StrUtil.isBlank(fileUrl)) {
+          log.info("当前链接为空，已跳过: {}", fileUrl);
+          continue;  // 跳过空链接
+      }
+
+      // 处理图片 URL：去掉问号后的参数（防止转义问题）
+      int questionMarkIndex = fileUrl.indexOf("?");
+      if (questionMarkIndex > -1) {
+          fileUrl = fileUrl.substring(0, questionMarkIndex);
+      }
+      // 示例：https://example.com/img.jpg?w=200&h=150 → https://example.com/img.jpg
+
+      // 调用单图上传方法
+      PictureUploadRequest pictureUploadRequest = new PictureUploadRequest();
+      try {
+          PictureVO pictureVO = this.uploadPicture(fileUrl, pictureUploadRequest, loginUser);
+          log.info("图片上传成功, id = {}", pictureVO.getId());
+          uploadCount++;  // 成功则计数+1
+      } catch (Exception e) {
+          log.error("图片上传失败", e);
+          continue;  // 失败则跳过当前图片，继续下一张
+      }
+
+      if (uploadCount >= count) {  // 达到目标数量，停止循环
+          break;
+      }
+
+}
+
+  ---
+第6步：返回结果
+
+return uploadCount; // 返回实际成功上传的数量
+
+  ---
+总结
+
+┌──────┬──────────────┬───────────────────────────────┐
+│ 步骤 │ 功能 │ 技术点 │
+├──────┼──────────────┼───────────────────────────────┤
+│ 1 │ 参数校验 │ 限制最多 30 张 │
+├──────┼──────────────┼───────────────────────────────┤
+│ 2 │ 构造搜索 URL │ Bing 图片 API │
+├──────┼──────────────┼───────────────────────────────┤
+│ 3 │ 抓取 HTML │ Jsoup HTTP 请求 │
+├──────┼──────────────┼───────────────────────────────┤
+│ 4 │ 解析 DOM │ CSS 选择器 │
+├──────┼──────────────┼───────────────────────────────┤
+│ 5 │ 循环上传 │ 复用已有的 uploadPicture 方法 │
+├──────┼──────────────┼───────────────────────────────┤
+│ 6 │ 返回结果 │ 实际上传数量 │
+└──────┴──────────────┴───────────────────────────────┘
+
+关键设计思路
+
+1. 复用已有代码：调用 uploadPicture(fileUrl, ...)，URL 上传逻辑已在前面实现过
+2. 容错处理：单张失败不影响整体，continue 跳过
+3. 数量限制：防止用户一次抓取过多图片
+4. URL 清理：去掉 URL 参数避免转义问题
+
+---
+
+## URL 上传文件后缀丢失问题修复
+
+### 问题现象
+
+通过 URL 上传图片后，腾讯云 COS 保存的 URL **没有文件类型后缀**：
+
+```
+https://cc-picture-1308624837.cos.ap-shanghai.myqcloud.com/public/2058909011734790145/2026-06-09_8CtEnO3SPsc0aoXb.
+```
+
+URL 以 `.` 结尾，后面应该是 `.jpg`、`.png` 等后缀，但实际上丢失了。
+
+---
+
+### 问题排查过程
+
+#### 1. 定位问题代码
+
+在 `PictureUploadTemplate.uploadPicture()` 第 52 行：
+
+```java
+String originFilename = getOriginFilename(inputSource);
+String uploadFilename = String.format("%s_%s.%s", DateUtil.formatDate(new Date()), uuid, FileUtil.getSuffix(originFilename));
+```
+
+#### 2. 分析 `getOriginFilename()` 实现
+
+查看 `UrlPictureUpload.getOriginFilename()` 方法（原代码）：
+
+```java
+@Override
+protected String getOriginFilename(Object inputSource) {
+    String fileUrl = (String) inputSource;
+    // 从 URL 中提取文件名
+    return FileUtil.mainName(fileUrl);  // ❌ 问题在这里！
+}
+```
+
+**`FileUtil.mainName()` 的作用**：去掉文件后缀，只保留主文件名
+
+例如：
+- `image.jpg` → `image`
+- `https://example.com/photo.png` → `https://example.com/photo`
+
+#### 3. 追踪后缀丢失的完整链路
+
+```
+原始 URL: https://example.com/image.jpg?w=200
+    ↓
+UrlPictureUpload.getOriginFilename()
+    → FileUtil.mainName(fileUrl)
+    → "https://example.com/image"  (后缀 .jpg 被去掉！)
+    ↓
+PictureUploadTemplate.uploadPicture()
+    → FileUtil.getSuffix("https://example.com/image")
+    → "" (空字符串，因为已经没有后缀了)
+    ↓
+最终文件名: "2026-06-09_uuid." (没有后缀！)
+```
+
+---
+
+### 修复方案
+
+修改 `UrlPictureUpload.getOriginFilename()` 方法，**保留文件后缀**：
+
+```java
+@Override
+protected String getOriginFilename(Object inputSource) {
+    String fileUrl = (String) inputSource;
+    // 直接返回原始 URL，让模板方法统一处理文件名提取
+    // 去掉 URL 参数，保留文件名和后缀
+    int questionMarkIndex = fileUrl.indexOf("?");
+    if (questionMarkIndex > -1) {
+        fileUrl = fileUrl.substring(0, questionMarkIndex);
+    }
+    return fileUrl;  // 保留完整 URL，包含后缀
+}
+```
+
+---
+
+### 修复前后对比
+
+| 阶段 | 修复前 | 修复后 |
+|------|--------|--------|
+| **输入 URL** | `https://example.com/image.jpg?w=200` | `https://example.com/image.jpg?w=200` |
+| **getOriginFilename()** | `https://example.com/image` ❌ | `https://example.com/image.jpg` ✅ |
+| **FileUtil.getSuffix()** | `""` (空) ❌ | `"jpg"` ✅ |
+| **最终文件名** | `2026-06-09_uuid.` ❌ | `2026-06-09_uuid.jpg` ✅ |
+| **COS URL** | `.../2026-06-09_uuid.` ❌ | `.../2026-06-09_uuid.jpg` ✅ |
+
+---
+
+### 根本原因总结
+
+| 问题 | 原因 |
+|------|------|
+| **为什么要用 FileUtil.mainName()？** | 误以为要从 URL 中提取"文件名"，但实际上这个方法会去掉后缀 |
+| **为什么之前本地文件上传没问题？** | 本地文件上传的 `getOriginFilename()` 返回 `multipartFile.getOriginalFilename()`，保留后缀 |
+| **为什么 URL 上传会出问题？** | URL 上传的 `getOriginFilename()` 错误地使用了 `FileUtil.mainName()`，导致后缀丢失 |
+
+---
+
+### 经验教训
+
+1. **理解工具方法的行为**：`FileUtil.mainName()` 会去掉后缀，不是简单的"提取文件名"
+2. **统一处理逻辑**：两种上传方式（本地文件、URL）的 `getOriginFilename()` 应该返回**包含后缀**的完整文件名
+3. **模板方法的责任边界**：`FileUtil.getSuffix()` 应该在**有后缀**的字符串上调用，而不是已经被去掉后缀的字符串
+
+---
+
+### 修复后的完整链路
+
+```
+原始 URL: https://example.com/image.jpg?w=200
+    ↓
+UrlPictureUpload.getOriginFilename()
+    → 去掉参数: "https://example.com/image.jpg"
+    → 返回完整 URL
+    ↓
+PictureUploadTemplate.uploadPicture()
+    → FileUtil.getSuffix("https://example.com/image.jpg")
+    → "jpg" ✅
+    ↓
+最终文件名: "2026-06-09_uuid.jpg" ✅
+    ↓
+COS URL: https://cc-picture-xxx.cos.ap-shanghai.myqcloud.com/public/2058909011734790145/2026-06-09_uuid.jpg ✅
+```
+
+---
+
+**修复时间**：2026-06-09  
+**影响范围**：所有通过 URL 上传的图片  
+**修复验证**：上传一张图片，检查 COS URL 是否包含正确的文件后缀
