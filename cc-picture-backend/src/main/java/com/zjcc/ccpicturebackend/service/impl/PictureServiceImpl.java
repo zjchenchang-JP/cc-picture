@@ -10,6 +10,9 @@ import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.manager.FileManager;
+import com.zjcc.ccpicturebackend.manager.upload.FilePictureUpload;
+import com.zjcc.ccpicturebackend.manager.upload.PictureUploadTemplate;
+import com.zjcc.ccpicturebackend.manager.upload.UrlPictureUpload;
 import com.zjcc.ccpicturebackend.model.dto.file.UploadPictureResult;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
@@ -48,17 +51,24 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         implements PictureService {
 
     @Resource
-    private FileManager fileManager;
+    // private FileManager fileManager;
+    private FilePictureUpload filePictureUpload;
+
+    @Resource
+    private UrlPictureUpload urlPictureUpload;
+
 
     @Resource
     private UserService userService;
 
     @Override
-    public PictureVO uploadPicture(MultipartFile multipartFile, PictureUploadRequest pictureUploadRequest, User loginUser) {
-        log.info("开始上传图片，用户ID = {}, pictureId = {}, 文件名 = {}",
+    public PictureVO uploadPicture(Object inputSource, PictureUploadRequest pictureUploadRequest, User loginUser) {
+        if (inputSource == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "上传图片为空");
+        }
+        log.info("开始上传图片，用户ID = {}, pictureId = {}",
                 loginUser.getId(),
-                pictureUploadRequest != null ? pictureUploadRequest.getId() : null,
-                multipartFile != null ? multipartFile.getOriginalFilename() : null);
+                pictureUploadRequest != null ? pictureUploadRequest.getId() : null);
 
         ThrowUtils.throwIf(null == loginUser, ErrorCode.NO_AUTH_ERROR);
         // 判断新增还是更新图片
@@ -69,10 +79,11 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 如果是更新图片要校验图片是否存在
         if (pictureId != null) {
             // 说明是更新
-            // 版本1.0 默认是管理员才能上传
+            // 版本v1.0 默认是管理员才能上传
             // boolean exists = this.lambdaQuery().eq(Picture::getId, pictureId)
             //         .exists();
             // ThrowUtils.throwIf(!exists, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+            // v2.0
             Picture oldPicture = this.getById(pictureId);
             ThrowUtils.throwIf(oldPicture == null, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
             // 仅上传者本人或管理员可编辑 权限校验逻辑
@@ -83,11 +94,15 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 上传图片
         // 按照用户 id 划分 上传目录
         String uploadPathPrefix = String.format("public/%s", loginUser.getId());
-        UploadPictureResult uploadPictureResult = fileManager.uploadPicture(multipartFile, uploadPathPrefix);
-
-        // 防御性编程：校验返回结果
-        ThrowUtils.throwIf(uploadPictureResult == null, ErrorCode.SYSTEM_ERROR, "图片上传失败");
-
+        // 根据 inputSource 类型区分上传方式
+        // 也可以通过传一个业务参数（如 type）来区分不同的上传方式
+        // 文件上传
+        PictureUploadTemplate pictureUploadTemplate = filePictureUpload;
+        if (inputSource instanceof String) {
+            // url上传
+            pictureUploadTemplate = urlPictureUpload;
+        }
+        UploadPictureResult uploadPictureResult = pictureUploadTemplate.uploadPicture(inputSource, uploadPathPrefix);
         // 构造要入库的图片信息
         Picture picture = new Picture();
         picture.setUrl(uploadPictureResult.getUrl());

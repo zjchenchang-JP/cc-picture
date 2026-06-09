@@ -102,7 +102,8 @@ public abstract class PictureUploadTemplate {
         uploadPictureResult.setPicFormat(imageInfo.getFormat());  
         uploadPictureResult.setPicSize(FileUtil.size(file));  
         uploadPictureResult.setUrl(cosClientConfig.getHost() + "/" + uploadPath);  
-        return uploadPictureResult;  
+        // 始终返回一个非null对象
+        return uploadPictureResult;
     }  
   
     /**  
