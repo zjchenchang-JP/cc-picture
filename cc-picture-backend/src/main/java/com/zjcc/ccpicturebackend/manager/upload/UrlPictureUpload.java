@@ -18,10 +18,17 @@ import java.util.Arrays;
 import java.util.List;
 
 @Service
-public class UrlPictureUpload extends PictureUploadTemplate {  
-    @Override  
-    protected void validPicture(Object inputSource) {  
-        String fileUrl = (String) inputSource;  
+public class UrlPictureUpload extends PictureUploadTemplate {
+
+    /**
+     * 缓存当前 URL 对应的 Content-Type
+     * key: URL, value: Content-Type (如 "image/jpeg")
+     */
+    private static final java.util.Map<String, String> URL_CONTENT_TYPE_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @Override
+    protected void validPicture(Object inputSource) {
+        String fileUrl = (String) inputSource;
         ThrowUtils.throwIf(StrUtil.isBlank(fileUrl), ErrorCode.PARAMS_ERROR, "文件地址不能为空");
         try {
             // 1.校验url格式
@@ -49,6 +56,8 @@ public class UrlPictureUpload extends PictureUploadTemplate {
                 final List<String> ALLOW_CONTENT_TYPES = Arrays.asList("image/jpeg", "image/jpg", "image/png", "image/webp");
                 ThrowUtils.throwIf(!ALLOW_CONTENT_TYPES.contains(contentType.toLowerCase()),
                         ErrorCode.PARAMS_ERROR, "文件类型错误");
+                // 缓存 Content-Type，后续生成文件名时使用
+                URL_CONTENT_TYPE_CACHE.put(fileUrl, contentType);
             }
             // 5. 校验文件大小
             String contentLengthStr = response.header("Content-Length");
@@ -72,13 +81,58 @@ public class UrlPictureUpload extends PictureUploadTemplate {
     @Override
     protected String getOriginFilename(Object inputSource) {
         String fileUrl = (String) inputSource;
-        // 直接返回原始 URL，让模板方法统一处理文件名提取
-        // 去掉 URL 参数，保留文件名和后缀
+        // 去掉 URL 参数
         int questionMarkIndex = fileUrl.indexOf("?");
         if (questionMarkIndex > -1) {
             fileUrl = fileUrl.substring(0, questionMarkIndex);
         }
+
+        // 从缓存中获取 Content-Type
+        String contentType = URL_CONTENT_TYPE_CACHE.get(fileUrl);
+        if (StrUtil.isNotBlank(contentType)) {
+            // 根据 Content-Type 生成正确的文件名
+            String extension = contentTypeToExtension(contentType);
+            if (StrUtil.isNotBlank(extension)) {
+                // 对于 Bing 等 URL，提取 ID 部分
+                String fileName = extractFileNameFromUrl(fileUrl);
+                return fileName + "." + extension;
+            }
+        }
+
+        // 如果没有 Content-Type，返回原始 URL（兼容旧逻辑）
         return fileUrl;
+    }
+
+    /**
+     * 从 URL 中提取文件名（去掉路径）
+     * 例如：https://example.com/path/to/OIP.xyz → OIP.xyz
+     */
+    private String extractFileNameFromUrl(String url) {
+        int lastSlashIndex = url.lastIndexOf("/");
+        if (lastSlashIndex > -1 && lastSlashIndex < url.length() - 1) {
+            return url.substring(lastSlashIndex + 1);
+        }
+        return url;
+    }
+
+    /**
+     * 将 Content-Type 转换为文件扩展名
+     */
+    private String contentTypeToExtension(String contentType) {
+        if (contentType == null) {
+            return null;
+        }
+        switch (contentType.toLowerCase()) {
+            case "image/jpeg":
+            case "image/jpg":
+                return "jpg";
+            case "image/png":
+                return "png";
+            case "image/webp":
+                return "webp";
+            default:
+                return null;
+        }
     }  
   
     @Override  

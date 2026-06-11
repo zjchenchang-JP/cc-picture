@@ -46,10 +46,12 @@ public abstract class PictureUploadTemplate {
         // 1. 校验图片  
         validPicture(inputSource);  
   
-        // 2. 图片上传地址  
+        // 2. 图片上传地址
         String uuid = RandomUtil.randomString(16);
         String originFilename = getOriginFilename(inputSource);
-        String uploadFilename = String.format("%s_%s.%s", DateUtil.formatDate(new Date()), uuid, FileUtil.getSuffix(originFilename));
+        String suffix = FileUtil.getSuffix(originFilename);
+        log.info("上传图片调试信息：originFilename = {}, suffix = {}", originFilename, suffix);
+        String uploadFilename = String.format("%s_%s.%s", DateUtil.formatDate(new Date()), uuid, suffix);
         String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
 
         File file = null;  

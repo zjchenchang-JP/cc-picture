@@ -2154,3 +2154,326 @@ COS URL: https://cc-picture-xxx.cos.ap-shanghai.myqcloud.com/public/205890901173
 **修复时间**：2026-06-09  
 **影响范围**：所有通过 URL 上传的图片  
 **修复验证**：上传一张图片，检查 COS URL 是否包含正确的文件后缀
+
+---
+
+## Bing 图片 URL 特殊格式导致后缀丢失
+
+### 问题现象
+
+通过 `uploadPictureByBatch` 从 Bing 批量抓取图片时，虽然第一次修复解决了标准 URL 的后缀问题，但 **Bing 图片的特殊 URL 格式**仍然导致后缀丢失：
+
+**调试日志输出**：
+```
+上传图片调试信息：originFilename = https://thfvnext.bing.com/th/id/OIP.eYG-J5FSGzEScenwq5UmQgHaE2, suffix = eYG-J5FSGzEScenwq5UmQgHaE2
+```
+
+**问题分析**：
+- `suffix = eYG-J5FSGzEScenwq5UmQgHaE2` 不是标准的文件后缀（jpg、png 等）
+- 这是 Bing 图片的 ID，被 `FileUtil.getSuffix()` 误认为是文件后缀
+- 最终 COS URL 变成：`.../2026-06-09_uuid.eYG-J5FSGzEScenwq5UmQgHaE2`
+
+---
+
+### Bing 图片 URL 格式分析
+
+#### 标准 URL vs Bing URL
+
+| URL 类型 | 示例 | 文件名格式 | 后缀提取结果 |
+|----------|------|------------|-------------|
+| **标准 URL** | `https://example.com/image.jpg?w=200` | `image.jpg` | `jpg` ✅ |
+| **Bing URL** | `https://thfvnext.bing.com/th/id/OIP.eYG-J5FSGzEScenwq5UmQgHaE2` | `OIP.eYG-J5FSGzEScenwq5UmQgHaE2` | `eYG-J5FSGzEScenwq5UmQgHaE2` ❌ |
+
+**Bing URL 的特点**：
+- 文件名包含点（`.`），但没有真正的文件后缀
+- 最后一个点后面的是图片 ID，不是文件类型
+- URL 中的 `Content-Type` 头才是真实的文件类型
+
+---
+
+### 排查过程
+
+#### 1. 添加调试日志
+
+在 `PictureUploadTemplate.uploadPicture()` 中添加日志：
+
+```java
+String originFilename = getOriginFilename(inputSource);
+String suffix = FileUtil.getSuffix(originFilename);
+log.info("上传图片调试信息：originFilename = {}, suffix = {}", originFilename, suffix);
+```
+
+#### 2. 发现异常输出
+
+**预期输出**：
+```
+originFilename = https://example.com/image.jpg, suffix = jpg
+```
+
+**实际输出**：
+```
+originFilename = https://thfvnext.bing.com/th/id/OIP.eYG-J5FSGzEScenwq5UmQgHaE2, suffix = eYG-J5FSGzEScenwq5UmQgHaE2
+```
+
+#### 3. 分析 Bing URL 格式
+
+```
+https://thfvnext.bing.com/th/id/OIP.eYG-J5FSGzEScenwq5UmQgHaE2
+                                ↓
+                          Bing 图片 ID 格式
+                                ↓
+                    FileUtil.getSuffix() 把 ID 当作后缀
+```
+
+---
+
+### 解决方案
+
+由于 Bing URL 无法通过文件名提取真实后缀，我们需要从 **HTTP 响应头的 Content-Type** 中获取文件类型。
+
+#### 核心思路
+
+1. **在 `validPicture()` 中缓存 Content-Type**：发送 HEAD 请求时保存 Content-Type
+2. **在 `getOriginFilename()` 中使用 Content-Type**：根据 Content-Type 生成正确的文件名和后缀
+3. **添加辅助方法**：Content-Type 转换为文件扩展名
+
+---
+
+### 完整修复代码
+
+#### UrlPictureUpload.java（修复后完整代码）
+
+```java
+package com.zjcc.ccpicturebackend.manager.upload;
+
+import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.http.HttpResponse;
+import cn.hutool.http.HttpStatus;
+import cn.hutool.http.HttpUtil;
+import cn.hutool.http.Method;
+import com.zjcc.ccpicturebackend.exception.BusinessException;
+import com.zjcc.ccpicturebackend.exception.ErrorCode;
+import com.zjcc.ccpicturebackend.exception.ThrowUtils;
+import org.springframework.stereotype.Service;
+
+import java.io.File;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.Arrays;
+import java.util.List;
+
+@Service
+public class UrlPictureUpload extends PictureUploadTemplate {
+
+    /**
+     * 缓存当前 URL 对应的 Content-Type
+     * key: URL, value: Content-Type (如 "image/jpeg")
+     * 
+     * 为什么用静态变量？
+     * - validPicture() 和 getOriginFilename() 是在同一个请求中调用的
+     * - 使用缓存可以在两个方法之间传递 Content-Type 信息
+     * - ConcurrentHashMap 保证线程安全
+     */
+    private static final java.util.Map<String, String> URL_CONTENT_TYPE_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @Override
+    protected void validPicture(Object inputSource) {
+        String fileUrl = (String) inputSource;
+        ThrowUtils.throwIf(StrUtil.isBlank(fileUrl), ErrorCode.PARAMS_ERROR, "文件地址不能为空");
+        try {
+            // 1. 校验 url 格式
+            new URL(fileUrl);
+        } catch (MalformedURLException e) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "URL格式不正确");
+        }
+        // 2. 校验 URL 协议
+        ThrowUtils.throwIf(!(fileUrl.startsWith("http://") || fileUrl.startsWith("https://")),
+                ErrorCode.PARAMS_ERROR, "仅支持 HTTP 或 HTTPS 协议的文件地址");
+
+        // 3. 发送 HEAD 请求以验证文件是否存在
+        HttpResponse response = null;
+        try {
+            response = HttpUtil.createRequest(Method.HEAD, fileUrl).execute();
+            // 未正常返回 无需后续验证
+            // 有些 URL 地址可能不支持通过 HEAD 请求访问，为了提高导入成功率，即使 HEAD 请求访问失败，也不会报错
+            if (response.getStatus() != HttpStatus.HTTP_OK) {
+                return;
+            }
+            // 4 校验文件类型
+            String contentType = response.header("Content-Type");
+            if (StrUtil.isNotBlank(contentType)) {
+                // 允许的图片类型
+                final List<String> ALLOW_CONTENT_TYPES = Arrays.asList("image/jpeg", "image/jpg", "image/png", "image/webp");
+                ThrowUtils.throwIf(!ALLOW_CONTENT_TYPES.contains(contentType.toLowerCase()),
+                        ErrorCode.PARAMS_ERROR, "文件类型错误");
+                // ✅ 关键修复：缓存 Content-Type，后续生成文件名时使用
+                URL_CONTENT_TYPE_CACHE.put(fileUrl, contentType);
+            }
+            // 5. 校验文件大小
+            String contentLengthStr = response.header("Content-Length");
+            if (StrUtil.isNotBlank(contentLengthStr)) {
+                try {
+                    long contentLength = Long.parseLong(contentLengthStr);
+                    // 限制文件大小为 2MB
+                    final long ONE_M = 1024 * 1024L;
+                    ThrowUtils.throwIf(contentLength > 2 * ONE_M, ErrorCode.PARAMS_ERROR, "文件大小不能超过 2M");
+                } catch (NumberFormatException e) {
+                    throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件大小格式错误");
+                }
+            }
+        } finally {
+            if (response != null) {
+                response.close();
+            }
+        }
+    }
+
+    @Override
+    protected String getOriginFilename(Object inputSource) {
+        String fileUrl = (String) inputSource;
+        // 去掉 URL 参数
+        int questionMarkIndex = fileUrl.indexOf("?");
+        if (questionMarkIndex > -1) {
+            fileUrl = fileUrl.substring(0, questionMarkIndex);
+        }
+
+        // ✅ 关键修复：从缓存中获取 Content-Type
+        String contentType = URL_CONTENT_TYPE_CACHE.get(fileUrl);
+        if (StrUtil.isNotBlank(contentType)) {
+            // 根据 Content-Type 生成正确的文件名
+            String extension = contentTypeToExtension(contentType);
+            if (StrUtil.isNotBlank(extension)) {
+                // 对于 Bing 等 URL，提取 ID 部分
+                String fileName = extractFileNameFromUrl(fileUrl);
+                return fileName + "." + extension;
+            }
+        }
+
+        // 如果没有 Content-Type，返回原始 URL（兼容旧逻辑）
+        return fileUrl;
+    }
+
+    /**
+     * 从 URL 中提取文件名（去掉路径）
+     * 例如：https://example.com/path/to/OIP.xyz → OIP.xyz
+     */
+    private String extractFileNameFromUrl(String url) {
+        int lastSlashIndex = url.lastIndexOf("/");
+        if (lastSlashIndex > -1 && lastSlashIndex < url.length() - 1) {
+            return url.substring(lastSlashIndex + 1);
+        }
+        return url;
+    }
+
+    /**
+     * 将 Content-Type 转换为文件扩展名
+     * 
+     * @param contentType HTTP Content-Type (如 "image/jpeg")
+     * @return 文件扩展名 (如 "jpg")
+     */
+    private String contentTypeToExtension(String contentType) {
+        if (contentType == null) {
+            return null;
+        }
+        switch (contentType.toLowerCase()) {
+            case "image/jpeg":
+            case "image/jpg":
+                return "jpg";
+            case "image/png":
+                return "png";
+            case "image/webp":
+                return "webp";
+            default:
+                return null;
+        }
+    }
+
+    @Override
+    protected void processFile(Object inputSource, File file) throws Exception {
+        String fileUrl = (String) inputSource;
+        // 下载文件到临时目录
+        HttpUtil.downloadFile(fileUrl, file);
+    }
+}
+```
+
+---
+
+### 修复后的处理流程
+
+#### 流程图
+
+```
+Bing URL: https://thfvnext.bing.com/th/id/OIP.eYG-J5FSGzEScenwq5UmQgHaE2
+    ↓
+validPicture() 发送 HEAD 请求
+    ↓
+获取 Content-Type: image/jpeg
+    ↓
+缓存到 URL_CONTENT_TYPE_CACHE
+    ↓
+getOriginFilename()
+    ↓
+提取文件名: OIP.eYG-J5FSGzEScenwq5UmQgHaE2
+    ↓
+转换 Content-Type: image/jpeg → jpg
+    ↓
+返回: OIP.eYG-J5FSGzEScenwq5UmQgHaE2.jpg
+    ↓
+FileUtil.getSuffix(OIP.eYG-J5FSGzEScenwq5UmQgHaE2.jpg) = "jpg" ✅
+    ↓
+最终文件名: 2026-06-09_uuid.jpg ✅
+    ↓
+COS URL: https://cc-picture-xxx.cos.ap-shanghai.myqcloud.com/public/.../2026-06-09_uuid.jpg ✅
+```
+
+---
+
+### 关键设计点
+
+| 设计点 | 说明 | 原因 |
+|--------|------|------|
+| **使用 Content-Type** | 从 HTTP 响应头获取真实文件类型 | Bing URL 文件名不包含真实后缀 |
+| **静态缓存** | 使用 `URL_CONTENT_TYPE_CACHE` 在方法间传递数据 | `validPicture()` 和 `getOriginFilename()` 需要共享 Content-Type |
+| **线程安全** | 使用 `ConcurrentHashMap` | 可能有多线程同时上传图片 |
+| **兼容性** | 如果没有 Content-Type，回退到原始逻辑 | 保证对标准 URL 的兼容性 |
+
+---
+
+### 对比总结
+
+#### 修复前后对比
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| **标准 URL** | ✅ 正常 | ✅ 正常 |
+| **Bing URL** | ❌ 后缀丢失 | ✅ 使用 Content-Type 生成后缀 |
+| **其他特殊 URL** | ❌ 可能后缀丢失 | ✅ 使用 Content-Type 生成后缀 |
+
+#### 最终效果
+
+**修复前**：
+```
+COS URL: .../2026-06-09_uuid.eYG-J5FSGzEScenwq5UmQgHaE2 ❌
+```
+
+**修复后**：
+```
+COS URL: .../2026-06-09_uuid.jpg ✅
+```
+
+---
+
+### 经验教训
+
+1. **不要假设 URL 格式**：不同来源的 URL 格式可能差异很大
+2. **优先使用 HTTP 头信息**：Content-Type 比文件名更可靠
+3. **调试日志的重要性**：通过日志快速定位问题根源
+4. **缓存的作用**：在方法间传递数据时，静态缓存是简单有效的方案
+
+---
+
+**修复时间**：2026-06-10  
+**影响范围**：所有通过 Bing 或类似特殊格式 URL 上传的图片  
+**修复验证**：通过 `uploadPictureByBatch` 批量上传 Bing 图片，检查 COS URL 是否包含正确的文件后缀
