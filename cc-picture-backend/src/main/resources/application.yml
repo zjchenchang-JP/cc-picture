@@ -21,6 +21,13 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     username: root
     password: 123456
+  # redis配置
+  redis:
+    database: 0
+    host: 127.0.0.1
+    port: 6379
+    timeout: 5000 #连接超时时间（毫秒）
+    password: 123456
 knife4j:
   enable: true
   production: false
