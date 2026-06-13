@@ -209,7 +209,7 @@ public class PictureController {
     }
 
     /**
-     * 性能优化 - 使用缓存的分页获取图片列表接口
+     * 性能优化 查询优化 - 使用缓存的分页获取图片列表接口
      * @param pictureQueryRequest
      * @param request
      * @return

@@ -2477,3 +2477,154 @@ COS URL: .../2026-06-09_uuid.jpg ✅
 **修复时间**：2026-06-10  
 **影响范围**：所有通过 Bing 或类似特殊格式 URL 上传的图片  
 **修复验证**：通过 `uploadPictureByBatch` 批量上传 Bing 图片，检查 COS URL 是否包含正确的文件后缀
+
+---
+
+# 2026/06/13
+
+## URL 上传图片 name 出现重复后缀（logo.png.png → name = logo.png）
+
+### 问题现象
+
+用户给 URL 上传添加 webp 支持后，发现通过 URL 上传一张 **URL 本身就带标准后缀** 的图片（如 `https://xxx/logo.png`），存入数据库的图片名称（`picName`）变成了 `logo.png`，**多了一个后缀**（预期应该是 `logo`）。
+
+> 注意：这次 bug 和"后缀丢失"方向相反，是"后缀重复"。加 webp 只是又多了一个触发场景，并不是 bug 的来源。
+
+---
+
+### 问题排查过程
+
+#### 1. name（picName）是怎么生成的？
+
+在 `PictureUploadTemplate` 中，`originFilename` 这个字符串被两个地方同时使用：
+
+```java
+// 模板方法 uploadPicture() 中
+String originFilename = getOriginFilename(inputSource);   // 由子类 UrlPictureUpload 实现
+
+// 用途1：取后缀，拼 COS 文件名
+String suffix = FileUtil.getSuffix(originFilename);
+
+// 用途2：取主名，存数据库 picName（在 buildResult 中）
+uploadPictureResult.setPicName(FileUtil.mainName(originFilename));
+```
+
+**关键认知**：同一个 `originFilename` 字符串，既要被 `getSuffix()` 取后缀（给 COS 文件名用），又要被 `mainName()` 取主名（给数据库 name 用）。如果 `originFilename` 自身后缀重复，两个用途都会受影响，只是表现不同。
+
+#### 2. 走一遍 URL = `https://xxx/logo.png` 的流程
+
+在 `UrlPictureUpload.getOriginFilename()` 中（这正是 06-10 为修 Bing 而写的逻辑）：
+
+```java
+// 去掉 URL 参数后 fileUrl = https://xxx/logo.png
+String contentType = URL_CONTENT_TYPE_CACHE.get(fileUrl);  // = "image/png"
+String extension   = contentTypeToExtension("image/png");  // = "png"
+String fileName    = extractFileNameFromUrl(fileUrl);      // = "logo.png"  ← URL 自带 .png，没去掉！
+return fileName + "." + extension;                          // = "logo.png.png"  ❌
+```
+
+所以 `originFilename = "logo.png.png"`。
+
+#### 3. 模板方法拿这个值继续处理
+
+| 用途 | 代码 | 输入 `logo.png.png` | 结果 |
+|------|------|---------------------|------|
+| 取后缀拼 COS 文件名 | `FileUtil.getSuffix()` | `logo.png.png` | `png` ✅（恰好正确，不影响 COS） |
+| 存数据库 name | `FileUtil.mainName()` | `logo.png.png` | `logo.png` ❌ |
+
+`FileUtil.mainName()` 只会去掉**最后一个点**之后的部分。`logo.png.png` → `logo.png`，于是数据库 name 留下了一个多余的 `.png`。
+
+> 这也解释了"为什么 COS 文件名看起来是对的、但数据库 name 却错了"——两个消费方对后缀重复的容错程度不同。
+
+---
+
+### 根本原因
+
+```java
+String fileName = extractFileNameFromUrl(fileUrl);  // 只取 URL 最后一段，不去后缀
+return fileName + "." + extension;                   // 无条件再拼一个后缀 → 重复
+```
+
+`extractFileNameFromUrl` 的职责是"取 URL 最后一段"，它**不会去掉原有的后缀**。于是：
+
+- **Bing 的 `OIP.eYG-J5FSGzEScenwq5UmQgHaE2`**：没有标准后缀，拼成 `OIP.eYG...E2.jpg`，`mainName` 取到 `OIP.eYG...E2`，没问题 → 这是 06-10 想解决的场景。
+- **标准的 `logo.png`**：URL 本身就有 `.png`，再拼一个变成 `logo.png.png`，`mainName` 留下 `logo.png` → 这是本次 bug。
+
+**结论：本轮 bug 正是上一轮"为修 Bing 后缀丢失而引入的拼接逻辑"造成的副作用。** 凡是 URL 本身带 `jpg/png/webp` 标准后缀的图片都会中招，加 webp 只是让 webp 这一类也被发现了而已。
+
+---
+
+### 修复方案
+
+思路：URL 提取出的文件名先用 `FileUtil.mainName()` 去掉原有后缀，再用 Content-Type 推导的后缀拼一次，从源头杜绝重复。顺带让 Bing 的 `OIP.xyz` 也变得更干净（`OIP.xyz.png` → `OIP.png`）。
+
+修改 `UrlPictureUpload.getOriginFilename()`：
+
+```java
+@Override
+protected String getOriginFilename(Object inputSource) {
+    String fileUrl = (String) inputSource;
+    // 去掉 URL 参数
+    int questionMarkIndex = fileUrl.indexOf("?");
+    if (questionMarkIndex > -1) {
+        fileUrl = fileUrl.substring(0, questionMarkIndex);
+    }
+
+    // 从缓存中获取 Content-Type
+    String contentType = URL_CONTENT_TYPE_CACHE.get(fileUrl);
+    if (StrUtil.isNotBlank(contentType)) {
+        // 根据 Content-Type 推导正确的后缀
+        String extension = contentTypeToExtension(contentType);
+        // 提取 URL 最后一段，并去掉原有后缀，避免重复拼接（如 logo.png.png）
+        String fileName = extractFileNameFromUrl(fileUrl);
+        String mainName = FileUtil.mainName(fileName);
+        if (StrUtil.isNotBlank(extension)) {
+            return mainName + "." + extension;
+        }
+        return mainName;
+    }
+
+    // 如果没有 Content-Type，返回原始 URL（兼容旧逻辑）
+    return fileUrl;
+}
+```
+
+核心改动只有一处：把原来的 `return fileName + "." + extension;` 换成先 `mainName`（去后缀）再拼。`FileUtil` 已在文件顶部 import，无需新增依赖。`extractFileNameFromUrl` 的职责也变得更单一（只负责"取文件名"），去后缀交给 `mainName`。
+
+---
+
+### 修复前后对比
+
+| URL 最后一段 | Content-Type | 修复前 originFilename | 修复前 name | 修复后 originFilename | 修复后 name |
+|------------|-------------|----------------------|------------|----------------------|------------|
+| `logo.png` | image/png | `logo.png.png` ❌ | `logo.png` ❌ | `logo.png` ✅ | `logo` ✅ |
+| `logo.webp` | image/webp | `logo.webp.webp` ❌ | `logo.webp` ❌ | `logo.webp` ✅ | `logo` ✅ |
+| `OIP.xyz` | image/png | `OIP.xyz.png` | `OIP.xyz` | `OIP.png` ✅（更干净） | `OIP` ✅ |
+| `logo`（无后缀） | image/png | `logo.png` | `logo` | `logo.png` ✅ | `logo` ✅ |
+
+---
+
+### 三次后缀修复的演进关系（打地鼠）
+
+| 时间 | 问题 | 修复手段 | 引入的副作用 |
+|------|------|---------|------------|
+| 2026-06-09 | URL 上传 COS 后缀丢失（误用 `mainName` 砍掉了后缀） | 改成返回完整 URL | — |
+| 2026-06-10 | Bing URL `OIP.xxx` 把 ID 当后缀 | 引入 Content-Type 缓存 + `extractFileNameFromUrl` + 拼后缀 | 标准后缀 URL 会重复拼接 ← **本轮 bug 的根源** |
+| 2026-06-13 | `logo.png` 变 `logo.png.png`，name 多后缀 | 先 `mainName` 去后缀，再按 Content-Type 拼一次 | （目前无） |
+
+后缀处理连续修了三次，本质是"修一个场景、又漏一个场景"。根本原因是 **`originFilename` 这一个字符串同时承担了"取后缀"和"取主名"两个职责**，对它的格式假设必须自洽——既要带后缀（给 `getSuffix`），又不能有重复后缀（给 `mainName`）。
+
+---
+
+### 经验教训
+
+1. **一个字符串两个职责的陷阱**：`originFilename` 同时用于 `getSuffix`（取后缀）和 `mainName`（取主名）。修改这个字符串的生成逻辑时，必须同时考虑两个消费方，不能只看其中一边。
+2. **工具方法的边界要清楚**：`FileUtil.mainName()` 只去掉"最后一个点"之后的部分，对 `a.b.c` 只去 `.c`，留下 `a.b`。不能假设它能"去掉所有后缀"或"只保留真正的文件名"。
+3. **修复必须回归所有场景**：06-10 为 Bing 加的拼接逻辑只验证了 Bing 场景，没回归"URL 本身带标准后缀"的场景，于是埋下了这次的回归 bug。
+4. **URL 上传后缀处理的回归清单**：以后改动这块，至少覆盖四类 URL —— 带标准后缀（jpg/png/webp）、Bing 无标准后缀（`OIP.xxx`）、带查询参数（`logo.png?v=1`）、纯无后缀（`logo`）。
+
+---
+
+**修复时间**：2026-06-13  
+**影响范围**：所有 URL 本身带标准图片后缀（jpg/png/webp）的上传请求  
+**修复验证**：用 `https://xxx/logo.png`、`logo.webp`、Bing `OIP.xxx` 三类 URL 分别上传，确认 name 无重复后缀、COS 文件后缀正确
