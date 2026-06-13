@@ -90,13 +90,15 @@ public class UrlPictureUpload extends PictureUploadTemplate {
         // 从缓存中获取 Content-Type
         String contentType = URL_CONTENT_TYPE_CACHE.get(fileUrl);
         if (StrUtil.isNotBlank(contentType)) {
-            // 根据 Content-Type 生成正确的文件名
+            // 根据 Content-Type 推导正确的后缀
             String extension = contentTypeToExtension(contentType);
+            // 提取 URL 最后一段，并去掉原有后缀，避免重复拼接（如 logo.png.png）
+            String fileName = extractFileNameFromUrl(fileUrl);
+            String mainName = FileUtil.mainName(fileName);
             if (StrUtil.isNotBlank(extension)) {
-                // 对于 Bing 等 URL，提取 ID 部分
-                String fileName = extractFileNameFromUrl(fileUrl);
-                return fileName + "." + extension;
+                return mainName + "." + extension;
             }
+            return mainName;
         }
 
         // 如果没有 Content-Type，返回原始 URL（兼容旧逻辑）
