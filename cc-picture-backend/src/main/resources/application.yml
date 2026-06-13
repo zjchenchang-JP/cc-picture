@@ -7,7 +7,10 @@ spring:
     name: yu-picture-backend
   mvc:
     pathmatch:
-      matching-strategy: ant_path_matcher
+      # Spring Boot 2.6+ 且集成了 Swagger/Knife4j，这个配置通常是必需的
+      # @RequestMapping("/api/**")    // ** 匹配多级路径
+      #  @GetMapping("/user/*/{id}")    // * 匹配单级路径
+      matching-strategy: ant_path_matcher # 兼容旧的通配符模式：支持 *（匹配任意字符）、**（匹配多级路径）、?（单字符）
     # 开放更大的文件上传体积
   servlet:
     multipart:
