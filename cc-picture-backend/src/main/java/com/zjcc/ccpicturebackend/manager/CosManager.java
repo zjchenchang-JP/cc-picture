@@ -62,7 +62,8 @@ public class CosManager {
         // 0 不返回原图信息，1返回原图信息，默认为0
         picOperations.setIsPicInfo(1);
         List<PicOperations.Rule> rules = new ArrayList<>();
-        // 图片压缩（转成 webp 格式）
+        // 性能优化 - 图片上传优化 图片压缩（转成 webp 格式）
+        // 原图 3.73MB 压缩后 403.99KB 压缩率 89.42%
         String webpKey = FileUtil.mainName(key) + ".webp";
         PicOperations.Rule compressRule = new PicOperations.Rule();
         compressRule.setRule("imageMogr2/format/webp");
