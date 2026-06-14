@@ -59,3 +59,9 @@ ALTER TABLE picture
 
 -- 创建基于 reviewStatus 列的索引
 CREATE INDEX idx_reviewStatus ON picture (reviewStatus);
+
+-- 性能优化 图片加载优化的目的是提升页面加载速度、减少带宽消耗，并改善用户体验
+-- 上传图片时，同时生成一份较小尺寸的缩略图
+ALTER TABLE picture
+    -- 添加新列
+    ADD COLUMN thumbnailUrl varchar(512) NULL COMMENT '缩略图 url';
