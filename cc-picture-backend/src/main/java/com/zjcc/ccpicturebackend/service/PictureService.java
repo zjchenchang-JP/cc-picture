@@ -93,4 +93,11 @@ public interface PictureService extends IService<Picture> {
             User loginUser
     );
 
+    /**
+     * 图片清理
+     * @param oldPicture
+     * 可以将clearPictureFile 方法运用到图片删除接口 等场景
+     */
+    void clearPictureFile(Picture oldPicture);
+
 }

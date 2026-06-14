@@ -2,6 +2,7 @@ package com.zjcc.ccpicturebackend.manager;
 
 import cn.hutool.core.io.FileUtil;
 import com.qcloud.cos.COSClient;
+import com.qcloud.cos.exception.CosClientException;
 import com.qcloud.cos.model.COSObject;
 import com.qcloud.cos.model.GetObjectRequest;
 import com.qcloud.cos.model.PutObjectRequest;
@@ -95,4 +96,16 @@ public class CosManager {
         putObjectRequest.setPicOperations(picOperations);
         return cosClient.putObject(putObjectRequest);
     }
+
+    /**
+     * 删除对象
+     * 性能优化 - 存储优化
+     * TODO 数据沉降和冷热数据分离
+     * 对于 “重存储” 的系统，数据清理是必要的！通过设置合理的清理策略，可以避免冗余数据占用存储空间，降低成本
+     * @param key 文件 key
+     */
+    public void deleteObject(String key) throws CosClientException {
+        cosClient.deleteObject(cosClientConfig.getBucket(), key);
+    }
+
 }
