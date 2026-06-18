@@ -2628,3 +2628,87 @@ protected String getOriginFilename(Object inputSource) {
 **修复时间**：2026-06-13  
 **影响范围**：所有 URL 本身带标准图片后缀（jpg/png/webp）的上传请求  
 **修复验证**：用 `https://xxx/logo.png`、`logo.webp`、Bing `OIP.xxx` 三类 URL 分别上传，确认 name 无重复后缀、COS 文件后缀正确
+
+---
+
+# 2026/06/18
+
+## @AllArgsConstructor 注解详解（Lombok 构造器注入）
+
+### 作用
+
+`@AllArgsConstructor` 是 **Lombok** 的注解，在**编译期**自动生成一个"包含类中所有字段"的构造方法，省去手写。
+
+以本项目 `SpaceController` 为例：
+
+```java
+@Slf4j
+@RestController
+@RequestMapping("/space")
+@AllArgsConstructor
+public class SpaceController {
+    private final SpaceService spaceService;
+    private final SpaceDAO spaceDAO;
+}
+```
+
+`@AllArgsConstructor` 等价于手写了下面这个构造方法：
+
+```java
+public SpaceController(SpaceService spaceService, SpaceDAO spaceDAO) {
+    this.spaceService = spaceService;
+    this.spaceDAO = spaceDAO;
+}
+```
+
+---
+
+### 在 Spring 中的真正用途：构造器注入
+
+这是它在 Controller / Service 上最常见的用法。Spring 有一条规则：
+
+> 一个类如果**只有一个构造方法**，Spring 会自动用它来注入依赖，连 `@Autowired` 都不用写。
+
+所以容器启动时，会找到 `SpaceService`、`SpaceDAO` 这两个 Bean，通过自动生成的构造方法注入进去。
+
+#### 对比字段注入
+
+| 方式 | 写法 | 优缺点 |
+|------|------|--------|
+| 字段注入 | `@Autowired private SpaceService spaceService;` | 字段不能 final、隐藏依赖、单测要靠反射塞 mock |
+| 构造器注入（本例） | `private final SpaceService spaceService;` + `@AllArgsConstructor` | 字段可 final（不可变、线程安全）、依赖一目了然、单测直接 `new SpaceController(mockService, mockDao)` |
+
+---
+
+### 三个相关注解对比
+
+| 注解 | 生成的构造方法 | 适用场景 |
+|------|--------------|---------|
+| `@NoArgsConstructor` | 无参构造 | 需要无参构造（如 JPA 实体、序列化框架） |
+| `@AllArgsConstructor` | **所有字段**都作为参数 | 字段较少且全是依赖时可用 |
+| `@RequiredArgsConstructor` | 只有 `final` 字段 / `@NonNull` 字段作为参数 | **Spring 依赖注入首选** |
+
+---
+
+### 为什么推荐换成 @RequiredArgsConstructor
+
+`SpaceController` 里两个字段都是 `final`，此时 `@AllArgsConstructor` 和 `@RequiredArgsConstructor` **效果完全一样**。但区别在于：
+
+- 万一以后加了一个**非 final 的普通字段**（比如某个配置值），`@AllArgsConstructor` 会把它也塞进构造方法，让 Spring 去找对应的 Bean → 找不到就启动报错；
+- `@RequiredArgsConstructor` 只收 `final` 字段，普通字段不进构造方法，不会出问题。
+
+所以做依赖注入时，**`@RequiredArgsConstructor` 是更稳妥的标配写法**。
+
+| 场景 | @AllArgsConstructor | @RequiredArgsConstructor |
+|------|---------------------|--------------------------|
+| 全是 final 字段 | ✅ 正常 | ✅ 正常 |
+| 混入非 final 字段 | ❌ 会把普通字段也作为构造参数 | ✅ 只注入 final 字段 |
+| 依赖注入推荐度 | 一般 | ⭐ 首选 |
+
+---
+
+### 小结
+
+- `@AllArgsConstructor` = 自动生成"全字段构造方法"，配合 Spring 实现**构造器注入**，省去 `@Autowired`。
+- 依赖注入场景下，更推荐用 `@RequiredArgsConstructor`，避免未来加非 final 字段时把 Bean 装配搞坏。
+- 构造器注入优于字段注入：字段可 `final`、依赖清晰、便于单测。
