@@ -2712,3 +2712,199 @@ public SpaceController(SpaceService spaceService, SpaceDAO spaceDAO) {
 - `@AllArgsConstructor` = 自动生成"全字段构造方法"，配合 Spring 实现**构造器注入**，省去 `@Autowired`。
 - 依赖注入场景下，更推荐用 `@RequiredArgsConstructor`，避免未来加非 final 字段时把 Bean 装配搞坏。
 - 构造器注入优于字段注入：字段可 `final`、依赖清晰、便于单测。
+
+---
+
+## 并发按用户加锁：从 `.intern()` 到 `ConcurrentHashMap`
+
+### 场景：同一用户只能创建一个私有空间
+
+`SpaceServiceImpl.addSpace` 用"加锁 + 事务"保证同一用户不会重复创建私有空间，核心片段：
+
+```java
+// 针对用户进行加锁：同一用户串行，不同用户并行
+String lock = String.valueOf(userId).intern();
+synchronized (lock) {
+    Long newSpaceId = transactionTemplate.execute(status -> {
+        boolean exists = this.lambdaQuery().eq(Space::getUserId, userId).exists();
+        ThrowUtils.throwIf(exists, ErrorCode.OPERATION_ERROR, "每个用户只能有1个私有空间");
+        boolean result = this.save(space);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+        return space.getId();
+    });
+    return Optional.ofNullable(newSpaceId).orElse(-1L);
+}
+```
+
+目标：**同一个用户串行**（同时只有一个线程能创建空间），**不同用户并行**（互不阻塞）。
+
+---
+
+### 1. 为什么用 `.intern()`
+
+`String.valueOf(userId)` 每次调用都 new 一个**全新**的 String 对象（在堆里，不在常量池）。而 `synchronized` 锁的是**对象身份（内存地址）**，不是字符串内容。于是：
+
+```
+线程A：userId=123 → String.valueOf(123) → 对象 @0xA1
+线程B：userId=123 → String.valueOf(123) → 对象 @0xB2  ← 另一个对象！
+两个 synchronized 锁不同对象 → 互斥失效 ❌（锁形同虚设）
+```
+
+`.intern()` 返回字符串在**常量池里的规范实例**，相同内容永远返回**同一个**对象：
+
+```
+线程A："123".intern() → 常量池 "123" @0xP
+线程B："123".intern() → 同一个 @0xP
+锁同一个对象 → 互斥生效 ✅
+```
+
+**结论：`.intern()` 就是让"同一个 userId → 同一把锁"成立的关键。**
+
+> ⚠️ 这是 **JVM 进程级锁**，只在单个实例内有效。集群部署（多实例）就失效了，需要换成 Redis Redisson 分布式锁（按 `lock:userId` 加锁），和定时任务集群需要分布式锁是同一个道理。
+
+---
+
+### 2. （常量池全局共享）为什么用 intern 字符串当锁"不优雅"
+
+`.intern()` 能用，但属于 code smell。原因在于你拿了一个**谁都能碰、又收不回来**的全局对象，去充当一把本该归你独占的锁：
+
+**① 锁不归你管 → 可能和不相干代码抢同一把锁**
+intern 出来的字符串全 JVM 只有一份。任何代码（自己的、第三方 jar、框架）只要对**同样的字符串**加锁，就和你抢同一个 monitor。你无法保证没有别人用 `"123"` 当锁，一旦撞上，两个不相干的模块会莫名其妙互相阻塞——这种 bug 极难排查，因为代码里完全看不出关联。
+
+**② intern 进去的字符串收不回来 → 池污染 / 内存隐患**
+字符串常量池是全局共享结构：
+
+| JDK 版本 | 常量池位置 | intern 字符串能否回收 |
+|---------|----------|-----------------|
+| JDK 6 及以前 | PermGen | 几乎不回收，大量 intern 会 **PermGen OOM**（intern() 被告诫慎用的历史根源） |
+| JDK 7+ | 普通 Java 堆 | 理论上可 GC，但它是全局共享结构、回收时机远没有普通对象干脆 |
+
+后果：系统有 10 万用户，就有 10 万个形如 `"100001"` 的字符串被钉在池里。而用自己 Map 的话，**用完可以 `remove` 释放**。
+
+**③ 把"数据"当"锁"，语义不清**
+锁是基础设施，userId 是业务数据。用业务值当锁等于把两件事绑死：哪天锁的维度变了（比如按 `userId + 空间类型` 加锁），就得做字符串拼接 `"userId_" + uid + "_" + type`，越拼越脏；而一个专用锁对象一眼就知道"这是用来锁的"。
+
+**小结**：一把好锁应该是**你独占、可控、可回收、自解释**的对象；intern 字符串这四条一条都不满足。小规模单机可以用、教程里也常见，但它是个 smell；真正会咬人的是**集群后 JVM 锁直接失效**。
+
+---
+
+### 3. 更优雅的写法：`ConcurrentHashMap` 登记锁对象
+
+```java
+private final ConcurrentHashMap<Long, Object> userLocks = new ConcurrentHashMap<>();
+
+Object lock = userLocks.computeIfAbsent(userId, k -> new Object());
+synchronized (lock) {
+    // 业务逻辑
+}
+```
+
+#### 为什么用 `ConcurrentHashMap`（而不是 HashMap / synchronizedMap）
+
+**① 这张表是多线程共享的，普通 HashMap 会被写坏**
+每个线程进来都要 `get/computeIfAbsent` 自己 userId 对应的锁对象。多线程并发写普通 `HashMap` 会破坏内部结构（Java 7 会成环导致 CPU 100%，Java 8+ 丢数据），所以表本身**必须线程安全**。
+
+**② ★ 核心：`computeIfAbsent` 是原子的**
+要害是"同一个 userId 永远拿到**同一个**锁对象"。用普通 map 的 check-then-act 写法有竞态：
+
+```java
+// ❌ 竞态：同 userId 可能造出两把不同的锁
+Object lock = userLocks.get(userId);
+if (lock == null) {
+    lock = new Object();
+    userLocks.put(userId, lock);
+}
+```
+
+两个线程同时处理同一个 userId=123：
+
+```
+线程A：get(123) == null
+线程B：get(123) == null        ← 两人都看到没有
+线程A：new Object() → 对象@X，put(123, @X)
+线程B：new Object() → 对象@Y，put(123, @Y)   ← 同一个 userId 两把不同的锁 ❌
+```
+
+这跟"不用 intern 的字符串"是**同一个病**。
+
+`ConcurrentHashMap.computeIfAbsent(key, k -> new Object())` 是**原子操作**：同一个 key 只有一个线程执行 lambda 创建对象，其它线程直接拿到已存在的那个。一句话就拿到了"同 key → 同对象，必然"的保证——**这才是用 CHM 的根本原因，不是为了并发读快，而是为了原子语义**。
+
+**③ 桶级锁，不同 userId 查找互不阻塞**
+`Hashtable` / `Collections.synchronizedMap` 每次操作**锁整张表**，会把不同用户的查找也串起来，违背"不同用户并行"的目标。`ConcurrentHashMap` 按**桶（bucket）加锁**，不同 key 落在不同桶，查找可并行。
+
+#### 分工要清楚：真正做互斥的是 value 对象，不是 CHM
+
+| 角色 | 干什么 |
+|------|--------|
+| `ConcurrentHashMap` | 锁对象的**线程安全注册表**，负责安全地 get-or-create 锁对象 |
+| `synchronized(lock)` | 真正的**按用户互斥**靠 value 那个 `Object` |
+
+而且**不能在持有 CHM 内部桶锁的时候去做耗时业务**（DB 事务那一大坨）。标准姿势是先用 `computeIfAbsent` 把锁对象"取出来"，再在**表外** `synchronized(lock)`。
+
+#### ⚠️ 延伸坑：清理锁对象会重新引入竞态
+
+想"用完 `remove(userId)` 释放内存"？有竞态：
+
+```
+线程A：拿到锁对象@X，准备进 synchronized
+线程C：remove(123) 把@X删了
+线程D：computeIfAbsent(123) → 新建对象@Z
+→ 线程A 锁@X、线程D 锁@Z，同一个用户又出现两把锁 ❌
+```
+
+所以实际工程里要么**干脆不 remove**（接受 map 慢慢变大，或定期清空），要么直接用 **Guava `Striped<Lock>`**——固定数量的一组锁按 key hash 分配，既不创建无限对象、也没有清理竞态，本来就是为这种场景造的。
+
+---
+
+### 4. 三种"按用户加锁"写法对比
+
+| 写法 | "同 userId → 同锁" 怎么保证 | 优点 | 缺点 |
+|------|------------------------|------|------|
+| `String.valueOf(id).intern()` + `synchronized` | 常量池规范实例 | 简单、无额外字段 | 池污染、锁不归你管、集群失效 |
+| `ConcurrentHashMap<id, Object>` + `synchronized` | `computeIfAbsent` 原子 | 锁私有可控、桶级并发 | 清理有竞态、map 可能变大 |
+| Guava `Striped<Lock>` | 固定锁池按 hash 分配 | 无限对象、无清理竞态、内存可控 | 极小概率不同 key 撞同一把锁（可接受） |
+
+---
+
+### 经验教训
+
+1. `synchronized` 锁的是**对象身份**不是内容；要让"同值 → 同锁"成立，要么用 intern（能跑但不优雅），要么用专用注册表。
+2. "同 key → 同对象"在并发下天然有竞态，必须靠**原子操作**（`computeIfAbsent`）来保证——这正是 `ConcurrentHashMap` 在锁注册表场景的核心价值，不是为了读得快。
+3. JVM 级锁（`synchronized` / intern / CHM）都只在**单实例**有效；集群部署必须上分布式锁。
+4. 用业务值（字符串）当锁是把数据和并发机制耦合，优先用专用的、私有的锁对象。
+
+---
+
+## MyBatis-Plus 主键回写：为什么 `save` 后 `space.getId()` 能拿到新 id
+
+```java
+boolean result = this.save(space);
+return space.getId();   // 没有再查一次数据库，直接从对象里取
+```
+
+关键在 `Space` 实体上的注解：
+
+```java
+@TableId(type = IdType.ASSIGN_ID)
+private Long id;
+```
+
+`IdType.ASSIGN_ID` = MyBatis-Plus 用**雪花算法**生成全局唯一的 Long 主键。`this.save(space)`（来自 `ServiceImpl`）执行 INSERT 时：
+
+```
+1. MP 发现 id 为 null → 雪花算法生成一个 id
+2. 把这个 id 写回到 space 对象本身的 id 字段（通过反射，keyProperty=id）
+3. 执行 INSERT
+```
+
+所以 `save()` 一返回，**内存里同一个 `space` 对象的 `id` 已经被填上了**，`getId()` 直接读到——这就是"**主键回写**"，不用再 `SELECT` 一次。
+
+这个机制对所有主键策略都成立：
+
+| IdType | id 怎么来 | 回写时机 |
+|--------|----------|---------|
+| `ASSIGN_ID` | 雪花算法（**本项目用这个**） | insert **前**生成并回写 |
+| `AUTO` | 数据库自增 | insert **后**用 `LAST_INSERT_ID()` 取回回写 |
+| `ASSIGN_UUID` | UUID | insert 前生成并回写 |
+
+> 补充：`ASSIGN_ID` 只在 id 为 null 时才生成；如果实体上已经手动 `setId(...)` 了，MP 会直接用你给的值、不再生成雪花 id。
