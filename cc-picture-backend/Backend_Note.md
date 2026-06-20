@@ -2908,3 +2908,88 @@ private Long id;
 | `ASSIGN_UUID` | UUID | insert 前生成并回写 |
 
 > 补充：`ASSIGN_ID` 只在 id 为 null 时才生成；如果实体上已经手动 `setId(...)` 了，MP 会直接用你给的值、不再生成雪花 id。
+
+---
+
+## 编程式事务 TransactionTemplate：谁负责回滚
+
+承接上面的"按用户加锁"。那段代码在 `synchronized` 锁块里又套了一层**编程式事务** `transactionTemplate.execute(...)`：
+
+```java
+synchronized (lock) {
+    Long newSpaceId = transactionTemplate.execute(status -> {
+        boolean exists = this.lambdaQuery().eq(Space::getUserId, userId).exists();
+        ThrowUtils.throwIf(exists, ErrorCode.OPERATION_ERROR, "每个用户只能有1个私有空间");  // ① 抛异常 → 回滚
+        boolean result = this.save(space);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);                            // ② 抛异常 → 回滚
+        return space.getId();                                                              // ③ 正常返回 → 提交
+    });
+    return Optional.ofNullable(newSpaceId).orElse(-1L);
+}
+```
+
+### 直接结论：这段代码没有"显式回滚"语句，回滚靠抛异常自动触发
+
+`transactionTemplate.execute(callback)` 的回滚规则：
+
+| 回调里发生什么 | 结果 |
+|----------|------|
+| 正常 `return`（没异常） | **提交 commit** |
+| 抛出**任何异常**（RuntimeException 或 checked Exception 都算） | **自动回滚 rollback** |
+
+所以这段代码的"回滚负责人" = **回调里抛出的异常**，有三个触发点：
+
+1. 第 ① 行：用户已有私有空间 → `throwIf` 抛 `BusinessException` → 回滚（这里只有查询没写入，实际没什么数据可退，但事务确实标记回滚并把异常继续往上抛）。
+2. 第 ② 行：`save()` 返回 false → 抛 `BusinessException` → 回滚。
+3. `this.save(space)` 本身抛异常（主键冲突、字段约束等）→ 回滚。
+
+而第 ③ 行正常 `return` → 提交。
+
+### 两种"自己控制回滚"的方式
+
+| 方式 | 写法 | 本代码用了吗 |
+|------|------|----------|
+| （a）抛异常 → 自动回滚 | `throw new BusinessException(...)` 或 `ThrowUtils.throwIf(...)` | ✅ 用的就是这种 |
+| （b）手动标记回滚 + 正常返回 | `status.setRollbackOnly(); return null;` | ❌ 没用 |
+
+```java
+// （b）手动控制的写法（本代码没这么写）
+transactionTemplate.execute(status -> {
+    if (某条件) {
+        status.setRollbackOnly();   // 标记回滚，不抛异常
+        return null;
+    }
+    // ... 业务 ...
+});
+```
+
+本代码走的是（a），所以你**看不到任何 `rollback()` 调用**——**异常就是回滚开关**。
+
+### ⚠️ 坑：和 `@Transactional` 对 checked 异常的处理不同
+
+| 事务方式 | 抛 RuntimeException | 抛 checked Exception |
+|---------|--------------------|---------------------|
+| `@Transactional`（默认） | 回滚 | **不回滚**（默认提交！）需配 `rollbackFor` 才回滚 |
+| `TransactionTemplate.execute()` | 回滚 | **也回滚**（checked 异常被包成 `UndeclaredThrowableException` 再抛出） |
+
+所以这段代码里 `throwIf` 抛的 `BusinessException`（继承自 `RuntimeException`），无论用哪种事务都会触发回滚；但如果某天回调里抛了个 checked 异常，`@Transactional` 默认不会回滚，而 `TransactionTemplate.execute()` 会——这点要心里有数。
+
+### 为什么这里要"锁 + 事务"一起用
+
+把上面两节连起来看：
+
+| 机制 | 作用层级 | 解决什么 |
+|------|--------|---------|
+| `synchronized(lock)` | JVM 进程级 | 防止**同一用户的两个线程**同时进这段逻辑（防"检查-插入"竞态） |
+| `transactionTemplate.execute()` | 数据库级 | 保证"检查 exists + 插入"是**原子**的，失败整体回滚 |
+
+关键认知：**光靠事务防不住同一用户的并发插入**。默认隔离级别（READ COMMITTED）下，两个并发事务可能都查到"不存在"、然后都去插入——这正是外面那把 `synchronized` 要拦的。而事务负责的是"要么 check+insert 全成功、要么全回滚"的原子性（当 insert 之后还有其它写操作时，事务的价值更明显）。
+
+> 仍然要记住：`synchronized` 是 JVM 级锁，**集群部署就失效**，届时得把锁换成 Redis 分布式锁，事务那层不变。
+
+### 经验教训
+
+1. `TransactionTemplate` 的回滚默认**靠回调抛异常触发**，不需要（也不应该）手写 rollback。
+2. 想不抛异常也回滚，用 `status.setRollbackOnly()`；正常 `return` 就是提交。
+3. `TransactionTemplate.execute()` 对**所有异常**都回滚，比 `@Transactional`（默认只回滚 unchecked）更"激进"，checked 异常行为两者不同，迁移时要当心。
+4. "加锁 + 事务"组合拳：**锁防并发竞态，事务保原子性**，两者职责不同、不能互相替代；集群里锁要升级为分布式锁。
