@@ -34,6 +34,7 @@ import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
+import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
@@ -447,7 +448,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         return uploadCount;
     }
 
-    @Async
+    @Async // 异步执行 性能优化
     @Override
     public void clearPictureFile(Picture oldPicture) {
         // 判断该图片是否被多条记录使用
@@ -466,6 +467,42 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         if (StrUtil.isNotBlank(thumbnailUrl)) {
             cosManager.deleteObject(thumbnailUrl);
         }
+    }
+
+    @Override
+    public void checkPictureAuth(User loginUser, Picture picture) {
+        // 根据图片是否是公共图库 判定权限
+        Long spaceId = picture.getSpaceId();
+        if (spaceId == null) {
+            // 公共图库 仅本人或管理员可操作
+            if (!picture.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
+                throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
+            }
+        } else {
+            // 私有空间 仅该空间管理员可操作（本人或协同管理）
+            // 系统管理员也不能随意删除私有空间的图片
+            if (!picture.getUserId().equals(loginUser.getId())) {
+                throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
+            }
+        }
+    }
+
+    @Override
+    public void deletePicture(long pictureId, User loginUser) {
+        ThrowUtils.throwIf(pictureId <= 0,ErrorCode.PARAMS_ERROR);
+        ThrowUtils.throwIf(loginUser == null,ErrorCode.NOT_LOGIN_ERROR);
+        // 要删除图片是否存在
+        Picture oldPicture = this.getById(pictureId);
+        ThrowUtils.throwIf(oldPicture == null,ErrorCode.NOT_FOUND_ERROR);
+        // 校验权限
+        checkPictureAuth(loginUser,oldPicture);
+        boolean result = this.removeById(pictureId);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+        // 异步清理文件
+        // this.clearPictureFile(oldPicture); // 同类调用 异步失效
+
+        // 改成(走代理,异步生效):
+        ((PictureService) AopContext.currentProxy()).clearPictureFile(oldPicture);
     }
 
 }

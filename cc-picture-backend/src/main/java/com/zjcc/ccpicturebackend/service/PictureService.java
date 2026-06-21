@@ -100,4 +100,18 @@ public interface PictureService extends IService<Picture> {
      */
     void clearPictureFile(Picture oldPicture);
 
+    /**
+     * 校验是否有图片的 编辑or删除权限
+     * @param loginUser
+     * @param picture
+     * 有删除权限就有编辑权限）
+     */
+    void checkPictureAuth(User loginUser, Picture picture);
+
+    /**
+     * 删除图片
+     * @param pictureId
+     * @param loginUser
+     */
+    void deletePicture(long pictureId, User loginUser);
 }
