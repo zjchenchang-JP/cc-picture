@@ -2,10 +2,7 @@ package com.zjcc.ccpicturebackend.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadByBatchRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
+import com.zjcc.ccpicturebackend.model.dto.picture.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.zjcc.ccpicturebackend.model.entity.User;
@@ -114,4 +111,11 @@ public interface PictureService extends IService<Picture> {
      * @param loginUser
      */
     void deletePicture(long pictureId, User loginUser);
+
+    /**
+     * 编辑图片
+     * @param pictureEditRequest
+     * @param loginUser
+     */
+    void editPicture(PictureEditRequest pictureEditRequest, User loginUser);
 }

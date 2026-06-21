@@ -3,6 +3,7 @@ package com.zjcc.ccpicturebackend.service.impl;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.ObjUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -15,10 +16,7 @@ import com.zjcc.ccpicturebackend.manager.upload.FilePictureUpload;
 import com.zjcc.ccpicturebackend.manager.upload.PictureUploadTemplate;
 import com.zjcc.ccpicturebackend.manager.upload.UrlPictureUpload;
 import com.zjcc.ccpicturebackend.model.dto.file.UploadPictureResult;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureQueryRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadByBatchRequest;
-import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
+import com.zjcc.ccpicturebackend.model.dto.picture.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
@@ -503,6 +501,30 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
 
         // 改成(走代理,异步生效):
         ((PictureService) AopContext.currentProxy()).clearPictureFile(oldPicture);
+    }
+
+    @Override
+    public void editPicture(PictureEditRequest pictureEditRequest, User loginUser) {
+        // 在此处将实体类和 DTO 进行转换
+        Picture picture = new Picture();
+        BeanUtils.copyProperties(pictureEditRequest, picture);
+        // 注意将 list 转为 string
+        picture.setTags(JSONUtil.toJsonStr(pictureEditRequest.getTags()));
+        // 设置编辑时间
+        picture.setEditTime(new Date());
+        // 数据校验
+        this.validPicture(picture);
+        // 判断是否存在
+        long id = pictureEditRequest.getId();
+        Picture oldPicture = this.getById(id);
+        ThrowUtils.throwIf(oldPicture == null, ErrorCode.NOT_FOUND_ERROR);
+        // 校验权限
+        checkPictureAuth(loginUser, oldPicture);
+        // 补充审核参数
+        this.fillReviewParams(picture, loginUser);
+        // 操作数据库
+        boolean result = this.updateById(picture);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
     }
 
 }
