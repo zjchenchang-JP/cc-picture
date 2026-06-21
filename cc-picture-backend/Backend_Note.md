@@ -16,10 +16,10 @@
 
 因此，除了存储一些需要清理的临时文件之外，通常不会将用户上传并保存的文件（比如用户头像和图片）直接上传到服务器，而是更推荐使用专业的第三方存储服务，专业的工具做专业的事。其中，最常用的便是
 对象存储
-
 ### 什么是对象存储？
 
 对象存储是一种存储 海量文件 的 分布式 存储服务，具有高扩展性、低成本、可靠安全等优点。
+
 比如开源的对象存储服务 MinIO，还有商业版的云服务，像亚马逊 S3（Amazon S3）、阿里云对象存储（OSS）、腾讯云对象存储（COS）等等
 
 ### 本项目採用 设计方案
@@ -2993,3 +2993,161 @@ transactionTemplate.execute(status -> {
 2. 想不抛异常也回滚，用 `status.setRollbackOnly()`；正常 `return` 就是提交。
 3. `TransactionTemplate.execute()` 对**所有异常**都回滚，比 `@Transactional`（默认只回滚 unchecked）更"激进"，checked 异常行为两者不同，迁移时要当心。
 4. "加锁 + 事务"组合拳：**锁防并发竞态，事务保原子性**，两者职责不同、不能互相替代；集群里锁要升级为分布式锁。
+
+---
+
+# 2026/06/21
+
+## 本类调用 @Async 失效：clearPictureFile 异步清理变成了同步
+
+### 问题现象
+
+`PictureServiceImpl.deletePicture()` 里删除图片后，注释写着"异步清理文件"，实际调用却写成了本类内部调用：
+
+```java
+@Override
+public void deletePicture(long pictureId, User loginUser) {
+    // ... 校验、删库记录 ...
+    // 异步清理文件
+    this.clearPictureFile(oldPicture);   // ← 本类内部用 this. 调用
+}
+
+@Async
+@Override
+public void clearPictureFile(Picture oldPicture) {
+    // ... 查是否被多条记录引用，引用数<=1 才删 COS 文件 ...
+}
+```
+
+`clearPictureFile` 明明标了 `@Async`，但因为是**本类内部 `this.` 调用**，异步**根本没生效**——实际是**同步阻塞**执行的。
+
+---
+
+### 为什么失效：Spring AOP 自调用（self-invocation）问题
+
+`@Async`、`@Transactional`、`@Cacheable` 这类注解，都是靠 **Spring AOP 代理**实现的。Spring 注入到 Controller 的不是你写的原始 `PictureServiceImpl`，而是一个**代理对象**（外面包了一层增强逻辑）：
+
+```
+Controller → [代理对象: 拦截 @Async,把方法提交到线程池] → 原始 PictureServiceImpl
+```
+
+两种调用路径，结果完全不同：
+
+| 调用方式 | 走不走代理 | @Async 生效吗 |
+|---------|----------|-------------|
+| 外部调用（Controller → `pictureService.clearPictureFile()`） | ✅ 走代理 | ✅ 异步 |
+| 本类调用（`deletePicture` 里 `this.clearPictureFile()`） | ❌ `this` 是原始对象，跳过代理 | ❌ 同步 |
+
+**关键认知：`this` 指向的是原始对象，不是代理对象。** 本类内部 `this.xxx()` 调用直接绕过了代理，`@Async` 的增强逻辑根本没机会执行，方法在**当前线程**里老老实实同步跑。
+
+> 这个坑不止 `@Async`——`@Transactional`、`@Cacheable`、`@Retryable` 遇到本类调用全都失效，原理一模一样：注解生效靠代理，`this.` 走不到代理。
+
+---
+
+### 实际影响
+
+- **功能上没坏**：文件照样会被删（COS 的 `deleteObject` 照常执行，只是不在线程池里跑）。
+- **但"异步"没了**：清理在**当前请求线程**里同步执行，用户的删除请求会一直阻塞，直到 COS 删除文件的网络 IO 跑完才返回。
+
+也就是说，注释写的"异步清理文件"，实际行为是"同步阻塞清理"，名不副实。
+
+---
+
+### 四种修复方案
+
+#### 方案①：自注入（改动最小，推荐）
+
+把自己当 Bean 注入进来，通过代理引用调用：
+
+```java
+@Resource
+@Lazy   // 必须加，否则启动期循环依赖
+private PictureService pictureService;   // 注入自身代理
+
+// deletePicture 内改为：
+pictureService.clearPictureFile(oldPicture);   // 走代理,@Async 生效
+```
+
+#### 方案②：拆到独立 Bean（最干净）
+
+把 `clearPictureFile` 挪到一个新的 `@Component`（如 `PictureFileCleaner`），`PictureServiceImpl` 注入它来调用。职责分离，彻底回避自调用。
+
+#### 方案③：AopContext 手动拿代理
+
+```java
+((PictureService) AopContext.currentProxy()).clearPictureFile(oldPicture);
+```
+
+**前置条件**：必须在启动类加 `@EnableAspectJAutoProxy(exposeProxy = true)`。
+
+#### 方案④：干脆不用 @Async，手动丢线程池
+
+```java
+CompletableFuture.runAsync(() -> this.clearPictureFile(oldPicture), asyncExecutor);
+```
+
+不依赖代理，本类调用也能异步，最稳。
+
+---
+
+### 和 `@EnableAspectJAutoProxy(exposeProxy = true)` 的关系
+
+本项目启动类上已经写了：
+
+```java
+@SpringBootApplication
+@EnableAspectJAutoProxy(exposeProxy = true)
+@EnableAsync
+public class CcPictureBackendApplication { ... }
+```
+
+这说明**方案③的前置条件早就满足了**，可以直接用 `AopContext.currentProxy()` 来修。
+
+#### `@EnableAspectJAutoProxy` 是什么
+
+开启 Spring 基于 AspectJ 注解的**自动代理**总开关。它在容器启动时注册一个 `AnnotationAwareAspectJAutoProxyCreator`（本质是 `BeanPostProcessor`），干一件事：
+
+> 扫描所有 Bean，凡是带 AOP 注解的（`@Async`、`@Transactional`、`@Cacheable`、自定义 `@Aspect` 等），就把它**包装成代理对象**注入到别处。代理拦截方法调用，真正把"异步""事务"增强逻辑织进去。
+
+没有代理，`@Async` / `@Transactional` 形同虚设。它是注解式 AOP 能跑起来的总开关。
+
+> 补充：Spring Boot 只要引了 `spring-boot-starter-aop`，基础自动代理默认就开了，所以**不带参数的 `@EnableAspectJAutoProxy` 在 Boot 项目里其实是冗余的**。这里特意写它，意义就在于传了 `exposeProxy = true`（这个不是默认值，必须显式开）。
+
+#### `exposeProxy = true` 才是重点
+
+默认代理对象是"藏起来"的——目标类内部不知道自己的代理是谁（这正是 `this.clearPictureFile()` 拿不到代理的原因）。加了 `exposeProxy = true` 后，Spring 会把**当前正在执行的代理对象**塞进一个 `ThreadLocal`（`AopContext`），于是你在目标方法里就能手动把它"捞"出来：
+
+```java
+((PictureService) AopContext.currentProxy()).clearPictureFile(oldPicture);
+```
+
+这就是方案③的写法。
+
+#### 另一个参数 `proxyTargetClass`（顺带）
+
+| 取值 | 代理方式 | 要求 |
+|------|---------|------|
+| `false`（默认） | 优先 JDK 动态代理 | 基于**接口**，目标类必须实现接口 |
+| `true` | 强制 CGLIB | 基于**子类继承**，不要求有接口 |
+
+Spring Boot 2.x+ 默认就是 CGLIB（`spring.aop.proxy-target-class=true`），所以一般不用管。
+
+---
+
+### 总结
+
+| 问题 | 答案 |
+|------|------|
+| 本类调用 `@Async` 方法，异步生效吗？ | ❌ 不生效，`this.` 绕过代理，变成同步 |
+| 文件还会被清理吗？ | ✅ 会，只是同步阻塞，不是异步 |
+| 为什么？ | `@Async` 靠 AOP 代理实现，`this` 是原始对象不走代理 |
+| 怎么修？ | 自注入 / 拆独立 Bean / `AopContext.currentProxy()` / 手动线程池 |
+| `@EnableAspectJAutoProxy` 干嘛的？ | 注解式 AOP 自动代理的总开关 |
+| `exposeProxy = true` 干嘛的？ | 把代理对象暴露到 `AopContext`，让方案③能拿到代理 |
+
+### 经验教训
+
+1. **`@Async`、`@Transactional` 等 AOP 注解只在"跨 Bean 调用"时生效**；本类内 `this.xxx()` 直接绕过代理，注解全部失效。
+2. 遇到自调用要异步/事务时，要么**自注入代理**（`@Lazy`），要么**拆到独立 Bean**，要么用 **`AopContext.currentProxy()`**（需 `exposeProxy = true`）。
+3. 排查"注解不生效"类问题，先问一句：**这个调用走的是代理还是原始对象？**——这是 Spring AOP 类问题的万能切入点。
+4. 代码注释（如"异步清理"）和实际行为不一致时，要警惕：注释可能是开发者的**意图**而非**事实**，以运行时行为为准。
