@@ -24,7 +24,7 @@ public interface PictureService extends IService<Picture> {
     /**
      * 上传图片
      *
-     * @param inputSource
+     * @param inputSource 文件/url
      * @param pictureUploadRequest
      * @param loginUser
      * @return

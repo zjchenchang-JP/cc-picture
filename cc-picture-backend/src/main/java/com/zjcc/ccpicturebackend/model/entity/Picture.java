@@ -123,5 +123,10 @@ public class Picture implements Serializable {
      */
     private String thumbnailUrl;
 
+    /**
+     * 空间 id 默认为 null 表示公共图库
+     */
+    private Long spaceId;
+
 
 }

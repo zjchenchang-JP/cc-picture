@@ -20,12 +20,14 @@ import com.zjcc.ccpicturebackend.model.dto.picture.PictureReviewRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadByBatchRequest;
 import com.zjcc.ccpicturebackend.model.dto.picture.PictureUploadRequest;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
+import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.PictureReviewStatusEnum;
 import com.zjcc.ccpicturebackend.model.vo.PictureVO;
 import com.zjcc.ccpicturebackend.model.vo.UserVO;
 import com.zjcc.ccpicturebackend.service.PictureService;
 import com.zjcc.ccpicturebackend.mapper.PictureMapper;
+import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.service.UserService;
 import lombok.extern.slf4j.Slf4j;
 import org.jsoup.Jsoup;
@@ -33,6 +35,7 @@ import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
@@ -70,6 +73,8 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
 
     @Resource
     private CosManager cosManager;
+    @Resource
+    private SpaceService spaceService;
 
     @Override
     public PictureVO uploadPicture(Object inputSource, PictureUploadRequest pictureUploadRequest, User loginUser) {
@@ -81,6 +86,17 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
                 pictureUploadRequest != null ? pictureUploadRequest.getId() : null);
 
         ThrowUtils.throwIf(null == loginUser, ErrorCode.NO_AUTH_ERROR);
+        // 如果要更新空间参数，校验空间是否存在
+        Long spaceId = pictureUploadRequest.getSpaceId();
+        if (spaceId != null) {
+            Space oldSpace = spaceService.getById(spaceId);
+            ThrowUtils.throwIf(oldSpace == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
+            // 必须空间创建人(或管理员)才能修改
+            // 现阶段空间的管理员就是空间的创建人,后续会增加团队空间概念
+            if (!loginUser.getId().equals(oldSpace.getUserId())) {
+                throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "没有空间权限");
+            }
+        }
         // 判断新增还是更新图片
         Long pictureId = null;
         if (pictureUploadRequest != null) {
@@ -100,10 +116,34 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             if (!oldPicture.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
                 throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
             }
+            // v3.0
+            // 更新图片，需要校验更新时传递的 spaceId 和已有图片的 spaceId 是否一致。
+            // 没传 spaceId，则复用原有图片的 spaceId
+            if (spaceId == null) {
+                if (oldPicture.getSpaceId() != null) {
+                    spaceId = oldPicture.getSpaceId();
+                }
+            } else {
+                // 传了 spaceId，必须和原有图片一致 ???为什么不能修改空间Id
+                // 更新场景只换"文件相关的属性"(URL、尺寸、大小、格式)
+                // pictureId != null 更新图片，职责是"原地替换图片文件",而不是"把图片搬到别的空间"
+                if (ObjUtil.notEqual(spaceId, oldPicture.getSpaceId())) {
+                    throw new BusinessException(ErrorCode.PARAMS_ERROR, "空间id不一致");
+                }
+            }
         }
         // 上传图片
-        // 按照用户 id 划分 上传目录
-        String uploadPathPrefix = String.format("public/%s", loginUser.getId());
+        // 按照用户 id 划分 上传目录 => v3.0 按照空间划分目录
+        // String uploadPathPrefix = String.format("public/%s", loginUser.getId());
+        String uploadPathPrefix;
+        if (spaceId == null) {
+            // 公共图库
+            uploadPathPrefix = String.format("public/%s", loginUser.getId());
+        } else {
+            // 空间
+            uploadPathPrefix = String.format("space/%s", spaceId);
+        }
+
         // 根据 inputSource 类型区分上传方式
         // 也可以通过传一个业务参数（如 type）来区分不同的上传方式
         // 文件上传
@@ -115,6 +155,8 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         UploadPictureResult uploadPictureResult = pictureUploadTemplate.uploadPicture(inputSource, uploadPathPrefix);
         // 构造要入库的图片信息
         Picture picture = new Picture();
+        // v3.0 指定空间id
+        picture.setSpaceId(spaceId);
         picture.setUrl(uploadPictureResult.getUrl());
         // 缩略图url地址
         picture.setThumbnailUrl(uploadPictureResult.getThumbnailUrl());
@@ -123,7 +165,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         if (pictureUploadRequest != null && StrUtil.isNotBlank(pictureUploadRequest.getPicName())) {
             picName = pictureUploadRequest.getPicName();
         }
-        // 如果未设置，仍依赖于解析的结果
+        // 如果未设置，仍依赖于腾讯COS解析的结果
         picture.setName(picName);
         picture.setPicSize(uploadPictureResult.getPicSize());
         picture.setPicWidth(uploadPictureResult.getPicWidth());
@@ -301,7 +343,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "请勿重复审核");
         }
         Picture updatePicture = new Picture();
-        BeanUtils.copyProperties(pictureReviewRequest,updatePicture);
+        BeanUtils.copyProperties(pictureReviewRequest, updatePicture);
         updatePicture.setReviewerId(loginUser.getId());
         updatePicture.setReviewTime(new Date());
         boolean result = this.updateById(updatePicture);
@@ -318,7 +360,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         //         // 乐观锁：确保状态没被改过
         //         .eq("reviewStatus", oldPicture.getReviewStatus())
         //         .update(updatePicture);
-        ThrowUtils.throwIf(!result,ErrorCode.OPERATION_ERROR);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
     }
 
     @Override

@@ -29,6 +29,11 @@ public class PictureUploadRequest implements Serializable {
      * 所以需要给该方法接受的参数 PictureUploadRequest 类中补充 picName 参数
      */
     private String picName;
+
+    /**
+     * 空间 id
+     */
+    private Long spaceId;
   
     private static final long serialVersionUID = 1L;  
 }
