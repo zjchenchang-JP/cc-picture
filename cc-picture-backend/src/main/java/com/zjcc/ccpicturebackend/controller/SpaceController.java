@@ -52,7 +52,32 @@ public class SpaceController {
         return ResultUtils.success(newId);
     }
 
-
+    /**
+     * 删除空间
+     * @param deleteRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/delete")
+    public BaseResponse<Boolean> deleteSpace(@RequestBody DeleteRequest deleteRequest
+            , HttpServletRequest request) {
+        if (deleteRequest == null || deleteRequest.getId() <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        User loginUser = userService.getLoginUser(request);
+        if (loginUser == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        // 判断要删除的空间是否存在
+        Long spaceId = deleteRequest.getId();
+        Space oldSpace = spaceService.getById(spaceId);
+        ThrowUtils.throwIf(oldSpace == null,ErrorCode.NOT_FOUND_ERROR);
+        // 校验权限
+        spaceService.checkSpaceAuth(loginUser,oldSpace);
+        boolean result = spaceService.removeById(spaceId);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+        return ResultUtils.success(true);
+    }
 
 
     /**

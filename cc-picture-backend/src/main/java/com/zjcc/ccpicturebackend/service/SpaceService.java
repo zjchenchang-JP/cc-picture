@@ -61,4 +61,12 @@ public interface SpaceService extends IService<Space> {
      * 创建或更新空间时，需要根据空间级别自动填充限额数据
      */
     void fillSpaceBySpaceLevel(Space space);
+
+    /**
+     * 校验空间权限
+     *
+     * @param loginUser
+     * @param space
+     */
+    void checkSpaceAuth(User loginUser, Space space);
 }
