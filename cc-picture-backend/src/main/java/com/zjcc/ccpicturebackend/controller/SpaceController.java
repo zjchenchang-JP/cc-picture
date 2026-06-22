@@ -13,15 +13,13 @@ import com.zjcc.ccpicturebackend.model.dto.space.SpaceAddRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceUpdateRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
+import com.zjcc.ccpicturebackend.model.vo.SpaceVO;
 import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.service.UserService;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -79,7 +77,6 @@ public class SpaceController {
         return ResultUtils.success(true);
     }
 
-
     /**
      * 更新接口 - 仅管理员
      * @param spaceUpdateRequest 前端请求
@@ -107,5 +104,30 @@ public class SpaceController {
         ThrowUtils.throwIf(!result,ErrorCode.OPERATION_ERROR);
         return ResultUtils.success(true);
     }
+
+    /**
+     * 根据 id 获取空间（仅管理员可用）
+     */
+    @GetMapping("/get")
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<Space> getSpaceById(Long id, HttpServletRequest request) {
+        ThrowUtils.throwIf(id <= 0,ErrorCode.PARAMS_ERROR);
+        Space space = spaceService.getById(id);
+        ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR);
+        return ResultUtils.success(space);
+    }
+
+    /**
+     * 根据 id 获取空间（封装类）
+     */
+    @GetMapping("/get/vo")
+    public BaseResponse<SpaceVO> getSpaceVOById(long id, HttpServletRequest request) {
+        ThrowUtils.throwIf(id <= 0,ErrorCode.PARAMS_ERROR);
+        Space space = spaceService.getById(id);
+        ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR);
+        // 获取封装类
+        return ResultUtils.success(spaceService.getSpaceVO(space,request));
+    }
+
 }
 

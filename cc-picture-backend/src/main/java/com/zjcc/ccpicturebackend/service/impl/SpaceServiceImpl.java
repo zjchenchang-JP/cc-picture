@@ -15,6 +15,7 @@ import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.SpaceLevelEnum;
 import com.zjcc.ccpicturebackend.model.vo.SpaceVO;
+import com.zjcc.ccpicturebackend.model.vo.UserVO;
 import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.mapper.SpaceMapper;
 import com.zjcc.ccpicturebackend.service.UserService;
@@ -107,7 +108,16 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
 
     @Override
     public SpaceVO getSpaceVO(Space space, HttpServletRequest request) {
-        return null;
+        // 对象转封装类
+        SpaceVO spaceVO = SpaceVO.objToVo(space);
+        // 查询关联用户信息
+        Long userId = space.getUserId();
+        if (userId != null && userId > 0) {
+            User user = userService.getById(userId);
+            UserVO userVO = userService.getUserVO(user);
+            spaceVO.setUser(userVO);
+        }
+        return spaceVO;
     }
 
     @Override
