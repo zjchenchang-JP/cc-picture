@@ -1,6 +1,7 @@
 package com.zjcc.ccpicturebackend.controller;
 
 import cn.hutool.core.bean.BeanUtil;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.zjcc.ccpicturebackend.annotation.AuthCheck;
 import com.zjcc.ccpicturebackend.common.BaseResponse;
 import com.zjcc.ccpicturebackend.common.DeleteRequest;
@@ -10,6 +11,7 @@ import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceAddRequest;
+import com.zjcc.ccpicturebackend.model.dto.space.SpaceQueryRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceUpdateRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
@@ -128,6 +130,41 @@ public class SpaceController {
         // 获取封装类
         return ResultUtils.success(spaceService.getSpaceVO(space,request));
     }
+
+    /**
+     * 分页获取空间列表（仅管理员可用）
+     */
+    @PostMapping("/list/page")
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<Page<Space>> listSpaceByPage(@RequestBody SpaceQueryRequest spaceQueryRequest) {
+        // 获取分页条件
+        int current = spaceQueryRequest.getCurrent();
+        int pageSize = spaceQueryRequest.getPageSize();
+        // 分页查询
+        Page<Space> spacePage = spaceService.page(new Page<>(current, pageSize),
+                spaceService.getQueryWrapper(spaceQueryRequest));
+        return ResultUtils.success(spacePage);
+    }
+
+    /**
+     * 分页获取空间列表（封装类）
+     */
+    @PostMapping("/list/page/vo")
+    public BaseResponse<Page<SpaceVO>> listSpaceVOByPage(@RequestBody SpaceQueryRequest spaceQueryRequest,
+                                                         HttpServletRequest request) {
+        long current = spaceQueryRequest.getCurrent();
+        long size = spaceQueryRequest.getPageSize();
+        // 限制爬虫
+        ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
+        // 查询数据库
+        Page<Space> spacePage = spaceService.page(new Page<>(current, size),
+                spaceService.getQueryWrapper(spaceQueryRequest));
+        // 获取封装类
+        return ResultUtils.success(spaceService.getSpaceVOPage(spacePage, request));
+    }
+
+
+
 
 }
 

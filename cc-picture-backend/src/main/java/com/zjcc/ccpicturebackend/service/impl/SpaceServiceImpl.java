@@ -1,6 +1,7 @@
 package com.zjcc.ccpicturebackend.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.ObjUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper;
@@ -22,10 +23,15 @@ import com.zjcc.ccpicturebackend.service.UserService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
 * @author zjcc
@@ -122,12 +128,56 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
 
     @Override
     public Page<SpaceVO> getSpaceVOPage(Page<Space> spacePage, HttpServletRequest request) {
-        return null;
+        List<Space> spaceList = spacePage.getRecords();
+        Page<SpaceVO> spaceVOPage = new Page<>(spacePage.getCurrent(), spacePage.getSize());
+        if (CollectionUtils.isEmpty(spaceList)) {
+            return spaceVOPage;
+        }
+        // 封装 每个space对应的关联user -> userVo
+        // 避免N+1查询，一次性拿到所有userId
+        Set<Long> userIds = spaceList.stream()
+                .map(Space::getUserId)
+                .filter(userId -> userId != null && userId > 0)
+                .collect(Collectors.toSet());// 去重 ？？ 有必要吗，一个用户只能创建一个空间
+        HashMap<Long, UserVO> userVOMap = new HashMap<>();
+        // 批量查询出所有user 再转换成userVo 存入userVoMap
+        if (!userIds.isEmpty()) {
+            List<User> userList = userService.listByIds(userIds);
+            userList.forEach(user -> userVOMap.put(user.getId(),userService.getUserVO(user)));
+        }
+        // 封装对象列表
+        List<SpaceVO> spaceVOList = spaceList.stream()
+                .map(space -> {
+                    SpaceVO spaceVO = SpaceVO.objToVo(space);
+                    UserVO userVO = userVOMap.get(space.getUserId());
+                    spaceVO.setUser(userVO);
+                    return spaceVO;
+                }).collect(Collectors.toList());
+        spaceVOPage.setRecords(spaceVOList);
+        return spaceVOPage;
     }
 
     @Override
     public QueryWrapper<Space> getQueryWrapper(SpaceQueryRequest spaceQueryRequest) {
-        return null;
+        QueryWrapper<Space> queryWrapper = new QueryWrapper<>();
+        // 没有传入 查询条件
+        if (spaceQueryRequest == null) {
+            return queryWrapper;
+        }
+        // 拼接查询条件
+        Long id = spaceQueryRequest.getId();
+        Long userId = spaceQueryRequest.getUserId();
+        String spaceName = spaceQueryRequest.getSpaceName();
+        Integer spaceLevel = spaceQueryRequest.getSpaceLevel();
+        String sortField = spaceQueryRequest.getSortField();
+        String sortOrder = spaceQueryRequest.getSortOrder();
+        queryWrapper.eq(ObjUtil.isNotEmpty(id), "id", id);
+        queryWrapper.eq(ObjUtil.isNotEmpty(userId), "userId", userId);
+        queryWrapper.like(StrUtil.isNotBlank(spaceName), "spaceName", spaceName);
+        queryWrapper.eq(ObjUtil.isNotEmpty(spaceLevel), "spaceLevel", spaceLevel);
+        // 排序
+        queryWrapper.orderBy(StrUtil.isNotBlank(sortField), "ascend".equals(sortOrder), sortField);
+        return queryWrapper;
     }
 
     @Override

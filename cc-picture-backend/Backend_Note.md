@@ -3151,3 +3151,291 @@ Spring Boot 2.x+ 默认就是 CGLIB（`spring.aop.proxy-target-class=true`），
 2. 遇到自调用要异步/事务时，要么**自注入代理**（`@Lazy`），要么**拆到独立 Bean**，要么用 **`AopContext.currentProxy()`**（需 `exposeProxy = true`）。
 3. 排查"注解不生效"类问题，先问一句：**这个调用走的是代理还是原始对象？**——这是 Spring AOP 类问题的万能切入点。
 4. 代码注释（如"异步清理"）和实际行为不一致时，要警惕：注释可能是开发者的**意图**而非**事实**，以运行时行为为准。
+
+---
+
+## @GetMapping 参数绑定：不加 @RequestBody 默认怎么传参
+
+以 `SpaceController.java` 为例：
+
+```java
+@GetMapping("/get")
+@AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+public BaseResponse<Space> getSpaceById(Long id, HttpServletRequest request) {
+    ThrowUtils.throwIf(id <= 0, ErrorCode.PARAMS_ERROR);
+    Space space = spaceService.getById(id);
+    ...
+}
+```
+
+这里 `Long id` **没加任何注解** → 默认从 **URL 查询字符串（query string）** 取值，实际请求长这样：
+
+```
+GET /space/get?id=123
+```
+
+Spring 把查询参数 `id` 的值绑定到方法参数 `id` 上（**参数名必须和 query 的 key 一致**）。
+
+---
+
+### 为什么不是 @RequestBody
+
+| 注解                | 数据从哪来                      | 一般配什么请求                     |
+|-------------------|----------------------------|-----------------------------|
+| `@RequestBody`    | **请求体（body）**，按 JSON 解析    | POST / PUT / DELETE（带 body） |
+| `@RequestParam`   | query string 或 form 表单     | GET / POST                  |
+| `@PathVariable`   | URL **路径**片段 `/get/{id}`   | 任意                          |
+| `@ModelAttribute` | 把多个字段拼成一个对象（来自 query/form） | 任意                          |
+| **不加注解**          | 看类型（见下）                    | 任意                          |
+
+`@RequestBody` 是用来读 **HTTP 请求体**里的 JSON 的。而 **GET 请求规范上不带 body**，所以 `@GetMapping` 的参数基本不用
+`@RequestBody`（强行用技术上能跑，但很怪、不推荐）。
+
+---
+
+### "不加注解"时，Spring 怎么决定从哪取值
+
+关键看参数**类型**：
+
+**① 简单类型**（`Long`、`String`、`Integer`、`int`、`Date`…）
+→ 等价于加了 `@RequestParam`，从 **query string**（GET）或 form 数据取值，参数名要匹配：
+
+```java
+// 这两行效果一样
+public BaseResponse<Space> getSpaceById(Long id, ...) { }
+public BaseResponse<Space> getSpaceById(@RequestParam Long id, ...) { }
+```
+
+> ⚠️ 这种情况下**默认 required=true**。如果请求里没带 `id`，Spring 会报缺失参数。想可选要写
+`@RequestParam(required = false) Long id`。
+
+**② 复杂类型（POJO / DTO）**
+→ 等价于加了 `@ModelAttribute`，Spring 把 query/form 里**字段名匹配**的值逐个塞进对象：
+
+```java
+// 假设 SpaceQueryRequest 有 name、level 字段
+public BaseResponse<...>
+
+list(SpaceQueryRequest req) {
+}
+// 请求：GET /space/list?name=我的空间&level=1
+// req.getName() = "我的空间", req.getLevel() = 1
+```
+
+**③ Spring 内置特殊类型**（`HttpServletRequest`、`HttpServletResponse`、`Principal`、`HttpSession`、`MultipartFile`…）
+→ Spring **自动注入**框架对象，不需要你传，也不需要注解。所以 `getSpaceById` 里的 `HttpServletRequest request` 就是这么进来的。
+
+---
+
+### 套到具体代码
+
+`getSpaceById(Long id, HttpServletRequest request)`：
+
+| 参数                           | 类型   | 绑定来源                                       |
+|------------------------------|------|--------------------------------------------|
+| `Long id`                    | 简单类型 | query string `?id=123`（等价 `@RequestParam`） |
+| `HttpServletRequest request` | 内置类型 | Spring 自动注入                                |
+
+所以前端调这个接口就是：`GET /space/get?id=123`，后端 `id` 就能拿到 `123`。
+
+---
+
+### 经验教训
+
+1. **GET 不用 `@RequestBody`**：GET 不带 body；`@RequestBody` 是 POST/PUT 那类有 JSON body 的请求才用的。
+2. **简单参数不加注解 = 隐式 `@RequestParam`**：从 query string 取，名字要对上，默认必填。
+3. **对象不加注解 = 隐式 `@ModelAttribute`**：按字段名从 query/form 拼对象。
+4. 真正想明确语义时，**建议老老实实把 `@RequestParam` / `@PathVariable` 写出来**——不写也能跑，但显式注解可读性更好、行为更可控（比如
+   `required = false`）。
+
+---
+
+## Spring Boot Profile 配置：多 yml 文件加载与激活机制
+
+### 为什么要拆成多个 yml 文件
+
+项目里有两个配置文件：
+
+- `application.yml` —— 公共配置（端口、数据库、redis、mybatis-plus 等），所有环境通用
+- `application-local.yml` —— 环境相关 / 敏感配置（COS 密钥），只在"本地环境"生效
+
+拆分目的：把**每个环境都一样**的配置放主文件，把**因环境而异或敏感**的配置放 profile 文件。切换环境（local / dev / prod）只改 active profile 即可，密钥不混在一起。
+
+### Profile 的加载规则：叠加 + 冲突时覆盖
+
+激活某个 profile 后，Spring Boot 的加载逻辑是：
+
+```
+1. 永远加载 application.yml            （基础配置）
+2. 额外加载 application-{profile}.yml   （profile 专属，作为补充/覆盖）
+3. 两者合并到同一个 Environment
+4. 同一个 key 两边都有 → profile 专属文件胜出
+   只有一边有的 → 直接用那边的值
+```
+
+**profile 专属文件是"补丁"，不是"替换"。** 激活 local 后，`application.yml` 里的端口/数据库/redis 照常全量生效，`application-local.yml` 只负责新增 `cos.client.*`（或覆盖冲突项）。
+
+| 配置项 | application.yml | application-local.yml | local 激活后 |
+|--------|:---:|:---:|------|
+| `server.port` | ✅ | — | 生效（主配置） |
+| `spring.datasource.*` | ✅ | — | 生效 |
+| `cos.client.*` | — | ✅ | 生效（local 补充进来） |
+
+### CosClientConfig 怎么读到 cos.client.*
+
+```java
+@Configuration
+@ConfigurationProperties(prefix = "cos.client")
+@Data
+public class CosClientConfig {
+    private String host;
+    private String secretId;
+    ...
+}
+```
+
+`@ConfigurationProperties(prefix = "cos.client")` 把 Environment 里所有 `cos.client.*` 属性按字段名绑到字段上（靠 `@Data` 生成的 setter 注入）。这些值在 `application-local.yml` 里，**只有 local profile 激活、该文件被加载后才会出现**；否则字段全是 null。
+
+### 激活 Profile 的五种方式
+
+#### 方式①：写在 application.yml 里（开发默认，推荐）
+
+```yaml
+spring:
+  profiles:
+    active: local
+```
+
+> 本项目这行目前是注释掉的（`application.yml:19-20`），靠 IDE 激活。推荐取消注释，让配置自包含。
+
+#### 方式②：命令行参数 `--`（打包部署 / 临时测试最常用）
+
+参数放在 `-jar xxx.jar` **后面**，`--` 开头是 **Spring Boot 命令行参数**：
+
+```bash
+# 单个 profile
+java -jar cc-picture-backend.jar --spring.profiles.active=local
+
+# 多个 profile（逗号分隔，后面的覆盖前面的）
+java -jar cc-picture-backend.jar --spring.profiles.active=dev,redis
+
+# 顺便覆盖其它配置项
+java -jar cc-picture-backend.jar --spring.profiles.active=prod --server.port=9000
+```
+
+Maven 启动（开发期）：
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.arguments="--spring.profiles.active=local"
+```
+
+#### 方式③：环境变量 `SPRING_PROFILES_ACTIVE`（容器 / Docker / K8s 必备）
+
+环境变量名是大写下划线形式（Spring 的 **relaxed binding** 自动把 `SPRING_PROFILES_ACTIVE` 映射到 `spring.profiles.active`）：
+
+```bash
+# Linux / macOS：临时设置（仅当前 shell 生效）
+export SPRING_PROFILES_ACTIVE=local
+java -jar cc-picture-backend.jar
+
+# Linux / macOS：一行搞定（只对这条命令生效）
+SPRING_PROFILES_ACTIVE=local java -jar cc-picture-backend.jar
+
+# Windows CMD
+set SPRING_PROFILES_ACTIVE=local
+java -jar cc-picture-backend.jar
+
+# Windows PowerShell
+$env:SPRING_PROFILES_ACTIVE="local"
+java -jar cc-picture-backend.jar
+```
+
+Docker：
+
+```bash
+# docker run 用 -e
+docker run -e SPRING_PROFILES_ACTIVE=prod -p 8123:8123 cc-picture
+```
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    image: cc-picture
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+```
+
+Kubernetes（在 Deployment 的 pod spec 里）：
+
+```yaml
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "prod"
+```
+
+> 环境变量方式的优点：**不用改代码、不用改命令行**，运维直接配，CI/CD 和容器化场景首选。
+
+#### 方式④：JVM 系统属性 `-D`（IDE 调试常用）
+
+参数放在 `-jar` **前面**：
+
+```bash
+java -Dspring.profiles.active=local -jar cc-picture-backend.jar
+```
+
+> ⚠️ `-D` 和 `--` 都能激活 profile，但**位置不能错**：
+> - `-Dxxx=yyy` → JVM 系统属性，**必须在 `-jar` 之前**
+> - `--xxx=yyy` → Spring 命令行参数，**必须在 `-jar` 之后**
+>
+> 写错位置会被当成 jar 的 main 方法参数，不生效也不报错，极难排查。
+
+#### 方式⑤：IDE 运行配置（本地开发，本项目用的就是这种）
+
+IntelliJ IDEA → Run/Debug Configurations，三种填法任选其一：
+
+- **Active profiles** 栏填 `local`
+- **VM options** 加 `-Dspring.profiles.active=local`
+- **Environment variables** 加 `SPRING_PROFILES_ACTIVE=local`
+
+### 优先级（高 → 低）
+
+同一个配置出现在多处时，按优先级高的为准：
+
+| 优先级 | 来源 | 示例 |
+|:---:|------|------|
+| 高 | 命令行参数 `--` | `--spring.profiles.active=local` |
+| ↑ | JVM 系统属性 `-D` | `-Dspring.profiles.active=local` |
+| ↑ | OS 环境变量 | `SPRING_PROFILES_ACTIVE=local` |
+| ↑ | application-{profile}.yml | application-local.yml |
+| 低 | application.yml | 基础配置 |
+
+> 同一个 profile 下，`application-{profile}.yml` 覆盖 `application.yml`；多个 profile 同时激活时，`active` 列表里**靠后的覆盖靠前的**。
+
+### 怎么确认到底激活了哪个
+
+看启动日志（banner 之后），Spring Boot 会打印一行：
+
+```
+The following 1 profile is active: "local"
+```
+
+- 看到这行 → profile 激活成功，`application-local.yml` 已加载
+- 看到 `No active profile set, fell back to default profiles: default` → 没激活，profile 文件没加载，`cos.client.*` 为 null
+
+### 本项目的坑
+
+`application.yml` 里 `spring.profiles.active: local` 是**注释掉的**（`:19-20`），所以：
+
+- 纯按 yml 启动 → local 不激活 → `cos.client.*` 为 null → `CosClientConfig` 字段全空 → COSClient 创建失败
+- 现在能跑 → 大概率是 IDE 运行配置（方式⑤）激活了 local
+
+修复：取消 `application.yml:19-20` 的注释，配置即自包含，换人换机器都不踩坑。
+
+### 经验教训
+
+1. **profile 文件是"补丁"不是"替换"**：激活 profile 后主配置照常全量生效，profile 文件只新增 / 覆盖冲突项。
+2. **激活方式按场景选**：开发用 IDE / yml；CI 和容器化用环境变量；临时调试用命令行 `--`。
+3. **`-D`（-jar 前）vs `--`（-jar 后）位置不能错**，写错不生效也不报错，排查要靠启动日志。
+4. **看启动日志确认 profile**："The following profile is active" 是排查"配置没生效"的第一步。
+5. **配置自包含优先**：能写在 `application.yml` 里的 active profile 就别只依赖 IDE，否则换人 / 换机器就踩坑。
