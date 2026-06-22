@@ -346,7 +346,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         updatePicture.setReviewerId(loginUser.getId());
         updatePicture.setReviewTime(new Date());
         boolean result = this.updateById(updatePicture);
-        // 应该数据库级别的乐观锁
+        // TODO 应该数据库级别的乐观锁
         // 并发审核风险
         // 两个管理员同时审核同一张图片,一个通过，一个拒绝，谁后执行谁覆盖，结果不可预期
         // 但 对于图片审核场景，并发审核的影响确实不大。因为：
