@@ -3439,3 +3439,79 @@ The following 1 profile is active: "local"
 3. **`-D`（-jar 前）vs `--`（-jar 后）位置不能错**，写错不生效也不报错，排查要靠启动日志。
 4. **看启动日志确认 profile**："The following profile is active" 是排查"配置没生效"的第一步。
 5. **配置自包含优先**：能写在 `application.yml` 里的 active profile 就别只依赖 IDE，否则换人 / 换机器就踩坑。
+
+---
+
+## editSpace 和 updateSpace 的业务意义：权限不同只是表象
+
+两个接口都是"改空间"，但**权限不同只是表象，本质区别是"能改哪些字段"**——`updateSpace` 是管理端全量更新，`editSpace` 是用户端受限编辑。
+
+### 业务定位
+
+| | `updateSpace`（`/space/update`） | `editSpace`（`/space/edit`） |
+|---|---|---|
+| **定位** | 管理端：**全量更新** | 用户端：**受限编辑** |
+| **给谁用** | 管理员 | 普通用户（本人空间） |
+| **能干什么** | 改空间名 + **改级别** + **改配额** | **只能改空间名** |
+
+### 核心区别：可改字段范围（由 DTO 控制）
+
+这是**比权限更重要的区别**，通过两个不同的 Request DTO 实现"字段级权限控制"：
+
+```java
+// SpaceUpdateRequest —— 管理员用
+private Long id;
+private String spaceName;
+private Integer spaceLevel;   // 空间级别（普通/专业/旗舰）
+private Long maxSize;         // 最大容量
+private Long maxCount;        // 最大数量
+
+// SpaceEditRequest —— 用户用（注释写明：目前仅允许编辑空间名称）
+private Long id;
+private String spaceName;
+```
+
+用户走 `editSpace` 时，后端接收的是 `SpaceEditRequest`，**压根没有 `spaceLevel`、`maxSize`、`maxCount` 这几个字段**。就算用户想传，也接不进来。这就是设计意图：
+
+> **防止用户自己给自己升级空间级别、自己把配额改大（白嫖）。** 升级和配额调整是管理员 / 付费才能做的事，普通用户只能改个名字。
+
+### 其他非权限区别
+
+| 维度 | updateSpace | editSpace |
+|------|-------------|-----------|
+| **权限校验方式** | `@AuthCheck(ADMIN_ROLE)` —— 基于**角色**（是不是管理员） | `checkSpaceAuth(loginUser, oldSpace)` —— 基于**资源所有权**（本人或管理员） |
+| **是否设 editTime** | ❌ 不设 | ✅ `space.setEditTime(new Date())` |
+| **fillSpaceBySpaceLevel 意义** | 有意义：管理员改了 spaceLevel → 按新级别重新填充配额 | ⚠️ **实际无意义**（见下） |
+| **校验顺序** | getById → copy → validSpace → fill → update | copy → fill → validSpace → 设 editTime → getById → checkAuth → update |
+
+### ⚠️ editSpace 里 fillSpaceBySpaceLevel 是多余的
+
+代码注释 `// 自动填充数据?? 编辑空间需要吗？` 的质疑是对的。`fillSpaceBySpaceLevel` 的逻辑是：
+
+```java
+SpaceLevelEnum spaceLevelEnum = SpaceLevelEnum.getEnumByValue(space.getSpaceLevel());
+if (spaceLevelEnum != null) {   // spaceLevel 为 null 时，这里直接不进
+    // 填充 maxSize / maxCount
+}
+```
+
+而 `SpaceEditRequest` 根本没有 `spaceLevel` → `space.getSpaceLevel()` 永远是 null → `getEnumByValue(null)` 返回 null → 这个方法**什么都不做**。所以 editSpace 里这一行是空跑，可以删掉。
+
+### 为什么要有两个接口（设计本质）
+
+这是经典的**"管理端 vs 用户端"双接口模式**，同一份资源、两个入口，各自有不同的：
+
+```
+              ┌─ 字段范围（全量 vs 受限）        ← 防白嫖，最小权限
+同一个 Space ─┼─ 权限模型（角色 vs 所有权）      ← 管理员能改任意空间，用户只能改自己的
+              └─ 校验 / 填充逻辑（按级别补配额 vs 只改名）
+```
+
+好处：**把"危险操作"（改级别 / 配额）和"安全操作"（改名）在接口层就隔离开**，而不是靠一个接口里写一堆 if-else 判断"当前用户能不能改这个字段"。字段层面的隔离比运行时判断更安全、更清晰。
+
+### 经验教训
+
+1. **看两个"看起来重复"的接口，先别急着合并**：先看它们的 DTO 字段范围——往往一个管危险字段、一个管安全字段，是刻意的字段级权限设计。
+2. **字段级权限优于运行时判断**：把敏感字段从用户端 DTO 里直接去掉，比在业务代码里 `if (isAdmin)` 判断更安全（用户根本传不进来，攻击面更小）。
+3. **权限模型有两种**：`@AuthCheck` 是基于**角色**（你是谁），`checkSpaceAuth` 是基于**资源所有权**（这东西是不是你的）—— 管理端常用前者，用户端常用后者。
+4. **方法里调用的工具方法要确认它的前置条件**：像 `fillSpaceBySpaceLevel` 依赖 `spaceLevel` 非空，用户端根本不传这个字段时调用它就是空跑——别盲目复制粘贴管理端的调用。
