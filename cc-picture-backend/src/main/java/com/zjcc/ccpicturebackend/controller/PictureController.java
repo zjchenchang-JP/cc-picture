@@ -16,11 +16,13 @@ import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.manager.FileManager;
 import com.zjcc.ccpicturebackend.model.dto.picture.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
+import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.PictureReviewStatusEnum;
 import com.zjcc.ccpicturebackend.model.vo.PictureTagCategory;
 import com.zjcc.ccpicturebackend.model.vo.PictureVO;
 import com.zjcc.ccpicturebackend.service.PictureService;
+import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.service.UserService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -38,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 图片功能API接口
+ *
  * @author zjchenchang
  * @createDate 2026/6/1 22:41
  */
@@ -53,6 +56,9 @@ public class PictureController {
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private SpaceService spaceService;
 
     // 本地缓存Caffeine
     private final Cache<String, String> LOCAL_CACHE =
@@ -102,7 +108,7 @@ public class PictureController {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         User loginUser = userService.getLoginUser(request);
-        pictureService.deletePicture(deleteRequest.getId(),loginUser);
+        pictureService.deletePicture(deleteRequest.getId(), loginUser);
         return ResultUtils.success(true);
     }
 
@@ -111,7 +117,7 @@ public class PictureController {
      */
     @PostMapping("/update")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
-    public BaseResponse<Boolean> updatePicture(@RequestBody PictureUpdateRequest pictureUpdateRequest,HttpServletRequest request) {
+    public BaseResponse<Boolean> updatePicture(@RequestBody PictureUpdateRequest pictureUpdateRequest, HttpServletRequest request) {
         if (pictureUpdateRequest == null || pictureUpdateRequest.getId() <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
@@ -127,7 +133,7 @@ public class PictureController {
         ThrowUtils.throwIf(oldPicture == null, ErrorCode.NOT_FOUND_ERROR);
         // 补充审核参数
         User loginUser = userService.getLoginUser(request);
-        pictureService.fillReviewParams(picture,loginUser);
+        pictureService.fillReviewParams(picture, loginUser);
         // 操作数据库
         boolean result = pictureService.updateById(picture);
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
@@ -145,7 +151,7 @@ public class PictureController {
         Picture picture = pictureService.getById(id);
         ThrowUtils.throwIf(picture == null, ErrorCode.NOT_FOUND_ERROR);
         // 空间权限校验
-        // 如果查询出的图片有 spaceId，则运用跟删除图片一样的校验逻辑，仅空间管理员可以查看
+        // 如果查询出的图片有 spaceId(非公共图库)，则运用跟删除图片一样的校验逻辑，仅空间管理员可以查看
         Long spaceId = picture.getSpaceId();
         if (spaceId != null) {
             User loginUser = userService.getLoginUser(request);
@@ -196,8 +202,23 @@ public class PictureController {
         long pageSize = pictureQueryRequest.getPageSize();
         // 限制爬虫  最多允许一次看20条数据
         ThrowUtils.throwIf(pageSize > 20, ErrorCode.PARAMS_ERROR);
-        // v2.0 增加审核 默认只能查看已过审的数据
-        pictureQueryRequest.setReviewStatus(PictureReviewStatusEnum.PASS.getValue());
+        // v3.0 空间权限校验
+        Long spaceId = pictureQueryRequest.getSpaceId();
+        // 公开图库
+        if (spaceId == null) {
+            // 普通用户默认只能查看已过审的公开数据
+            // v2.0 增加审核 默认只能查看已过审的数据
+            pictureQueryRequest.setReviewStatus(PictureReviewStatusEnum.PASS.getValue());
+            pictureQueryRequest.setNullSpaceId(true);
+        } else {
+            // 私有空间 本人才能查看
+            User loginUser = userService.getLoginUser(request);
+            Space space = spaceService.getById(spaceId);
+            ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
+            if (!loginUser.getId().equals(space.getUserId())) {
+                throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "没有空间权限");
+            }
+        }
         // 查询数据库
         Page<Picture> picturePage = pictureService.page(new Page<>(current, pageSize),
                 pictureService.getQueryWrapper(pictureQueryRequest));
@@ -207,11 +228,11 @@ public class PictureController {
     }
 
     /**
-     * 性能优化 查询优化 - 使用缓存的分页获取图片列表接口
+     * 性能优化 查询优化 - 使用多级缓存的分页获取图片列表接口
+     *
      * @param pictureQueryRequest
      * @param request
-     * @return
-     * 没缓存，平均 50ms：
+     * @return 没缓存，平均 50ms：
      * 有缓存，平均 20~30 ms，性能显著提升
      */
     @PostMapping("/list/page/vo/cache")
@@ -243,7 +264,7 @@ public class PictureController {
         cachedValue = valueOps.get(cacheKey);
         if (cachedValue != null) {
             // 如果命中 Redis，存入本地缓存并返回
-            LOCAL_CACHE.put(cacheKey,cachedValue);
+            LOCAL_CACHE.put(cacheKey, cachedValue);
             Page<PictureVO> cachedPage = JSONUtil.toBean(cachedValue, Page.class);
             return ResultUtils.success(cachedPage);
         }
@@ -256,9 +277,9 @@ public class PictureController {
 
         // 4. 存入 本地缓存 和 Redis 缓存
         String cacheValue = JSONUtil.toJsonStr(pictureVOPage);
-        LOCAL_CACHE.put(cacheKey,cacheValue);
+        LOCAL_CACHE.put(cacheKey, cacheValue);
         // 存入redis  5 - 10 分钟随机过期，防止雪崩
-        int cacheExpireTime = 300 +  RandomUtil.randomInt(0, 300);
+        int cacheExpireTime = 300 + RandomUtil.randomInt(0, 300);
         valueOps.set(cacheKey, cacheValue, cacheExpireTime, TimeUnit.SECONDS);
 
         // 返回结果
@@ -275,12 +296,13 @@ public class PictureController {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         User loginUser = userService.getLoginUser(request);
-        pictureService.editPicture(pictureEditRequest,loginUser);
+        pictureService.editPicture(pictureEditRequest, loginUser);
         return ResultUtils.success(true);
     }
 
     /**
      * 获取预置标签和分类
+     *
      * @return 预设的固定数据
      */
     @GetMapping("/tag_category")
@@ -300,6 +322,7 @@ public class PictureController {
 
     /**
      * 图片审核
+     *
      * @param pictureReviewRequest
      * @param request
      * @return
@@ -310,12 +333,13 @@ public class PictureController {
                                                  HttpServletRequest request) {
         ThrowUtils.throwIf(pictureReviewRequest == null, ErrorCode.PARAMS_ERROR);
         User loginUser = userService.getLoginUser(request);
-        pictureService.doPictureReview(pictureReviewRequest,loginUser);
+        pictureService.doPictureReview(pictureReviewRequest, loginUser);
         return ResultUtils.success(true);
     }
 
     /**
      * 批量抓取和创建图片
+     *
      * @param pictureUploadByBatchRequest
      * @param request
      * @return

@@ -215,10 +215,14 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         Integer reviewStatus = pictureQueryRequest.getReviewStatus();
         String reviewMessage = pictureQueryRequest.getReviewMessage();
         Long reviewerId = pictureQueryRequest.getReviewerId();
+        // v3.0 新增space相关字段
+        Long spaceId = pictureQueryRequest.getSpaceId();
+        boolean nullSpaceId = pictureQueryRequest.isNullSpaceId();
+
+        // v2.0 相关条件
         queryWrapper.eq(ObjUtil.isNotEmpty(reviewStatus), "reviewStatus", reviewStatus);
         queryWrapper.like(StrUtil.isNotBlank(reviewMessage), "reviewMessage", reviewMessage);
         queryWrapper.eq(ObjUtil.isNotEmpty(reviewerId), "reviewerId", reviewerId);
-
         // searchText：前端搜索框输入的关键词，在多个字段中模糊搜索（name OR introduction）
         // 假设传入 searchText = "风景"，name = "山水"，最终 SQL :
         /*
@@ -245,6 +249,13 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         queryWrapper.eq(ObjUtil.isNotEmpty(picHeight), "picHeight", picHeight);
         queryWrapper.eq(ObjUtil.isNotEmpty(picSize), "picSize", picSize);
         queryWrapper.eq(ObjUtil.isNotEmpty(picScale), "picScale", picScale);
+        // v3.0 相关
+        queryWrapper.eq(ObjUtil.isNotEmpty(spaceId), "spaceId", spaceId);
+        // 完全等价于:
+        // if (nullSpaceId) {
+        //     queryWrapper.isNull("spaceId");   // → SQL 里拼上 AND spaceId IS NULL
+        // }
+        queryWrapper.isNull(nullSpaceId, "spaceId");
         // JSON数组查询
         if (CollUtil.isNotEmpty(tags)) {
             // 注意转义
