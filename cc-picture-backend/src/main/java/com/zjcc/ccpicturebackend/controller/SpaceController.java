@@ -11,6 +11,7 @@ import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceAddRequest;
+import com.zjcc.ccpicturebackend.model.dto.space.SpaceEditRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceQueryRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceUpdateRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
@@ -24,6 +25,7 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpServletRequest;
+import java.util.Date;
 
 @Slf4j
 @RestController
@@ -104,6 +106,31 @@ public class SpaceController {
         // 执行更新
         boolean result = spaceService.updateById(space);
         ThrowUtils.throwIf(!result,ErrorCode.OPERATION_ERROR);
+        return ResultUtils.success(true);
+    }
+
+    /**
+     * 编辑空间（用户使用）
+     */
+    @PostMapping("/edit")
+    public BaseResponse<Boolean> editSpace(@RequestBody SpaceEditRequest spaceEditRequest, HttpServletRequest request) {
+        if (spaceEditRequest == null || spaceEditRequest.getId() <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        // DTO 和实体转换
+        Space space = new Space();
+        BeanUtils.copyProperties(spaceEditRequest, space);
+        spaceService.validSpace(space,false);
+        // 设置编辑时间
+        space.setEditTime(new Date());
+        User loginUser = userService.getLoginUser(request);
+        // 判断要更新的空间是否存在
+        Space oldSpace = spaceService.getById(spaceEditRequest.getId());
+        ThrowUtils.throwIf(oldSpace == null, ErrorCode.NOT_FOUND_ERROR);
+        // 仅本人或管理员可编辑
+        spaceService.checkSpaceAuth(loginUser,oldSpace);
+        boolean result = spaceService.updateById(space);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
         return ResultUtils.success(true);
     }
 

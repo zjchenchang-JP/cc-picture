@@ -134,7 +134,7 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
             return spaceVOPage;
         }
         // 封装 每个space对应的关联user -> userVo
-        // 避免N+1查询，一次性拿到所有userId
+        // 性能优化 避免N+1查询，一次性拿到所有userId
         Set<Long> userIds = spaceList.stream()
                 .map(Space::getUserId)
                 .filter(userId -> userId != null && userId > 0)
