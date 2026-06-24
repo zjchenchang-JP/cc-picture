@@ -3515,3 +3515,413 @@ if (spaceLevelEnum != null) {   // spaceLevel 为 null 时，这里直接不进
 2. **字段级权限优于运行时判断**：把敏感字段从用户端 DTO 里直接去掉，比在业务代码里 `if (isAdmin)` 判断更安全（用户根本传不进来，攻击面更小）。
 3. **权限模型有两种**：`@AuthCheck` 是基于**角色**（你是谁），`checkSpaceAuth` 是基于**资源所有权**（这东西是不是你的）—— 管理端常用前者，用户端常用后者。
 4. **方法里调用的工具方法要确认它的前置条件**：像 `fillSpaceBySpaceLevel` 依赖 `spaceLevel` 非空，用户端根本不传这个字段时调用它就是空跑——别盲目复制粘贴管理端的调用。
+
+---
+
+# 2026/06/24
+
+## 上传图片到空间：额度校验与更新（弱校验 + 最终一致）
+
+上传图片到空间时，**确实需要"校验额度 + 更新额度"两步**——上传前判断空间还有没有容量 / 数量，上传后把新图片的大小和数量累加进空间的 `totalSize` / `totalCount`。但这里讨论的核心是：**这两步用"弱校验"而不是"强校验"**。
+
+### 核心思想：弱校验（最终一致）vs 强校验（加锁）
+
+空间额度校验有两种做法，本项目选的是前者：
+
+| | 强校验（加锁） | **弱校验（本项目方案）** |
+|---|---|---|
+| 上传时怎么做 | 加锁 → 校验 → 插图 → 累加额度 → 解锁（全包在事务里） | **不加锁**，粗略校验 → 插图 → 累加额度 |
+| 并发下额度会不会被突破 | 绝不会 | **可能会，但只超一点点** |
+| 性能 | 差（每次上传都要抢锁，串行） | 好（并发上传互不阻塞） |
+| 复杂度 | 高（锁、事务、死锁） | 低 |
+| 兜底 | 不需要 | 靠**限流 + 定时任务**事后纠正 |
+
+设计哲学：**"上传时不为追求额度 100% 精确而付出加锁的性能代价，允许短暂轻微超额，事后用限流和定时任务兜底。"**
+
+### 为什么"瞬间大量上传，影响也不大"
+
+这是该方案的关键论证，有四层理由：
+
+**① 超额是"有界的小额溢出"，不是无限突破**
+
+并发竞态只会让额度被**少量**突破，不会失控：
+
+```
+某时刻：空间已用 95MB，上限 100MB，还剩 5MB
+线程A：读 totalSize=95，95+2=97 ≤100 → 通过
+线程B：读 totalSize=95，95+2=97 ≤100 → 通过   ← 读到的是同一个旧值！
+线程C：读 totalSize=95，95+2=97 ≤100 → 通过   ← 同上
+→ A/B/C 都通过，实际各传 2MB → 用了 101MB，超了 1MB
+```
+
+最坏情况 = "同一瞬间并发上传的图片总量"。这是**有上界的**，不是无底洞。就算用户瞬间并发传 100 张，顶多超 100 张的量，系统不会因此崩。
+
+**② 强校验的代价太高，不划算**
+
+每次上传都要给空间加锁（行锁或分布式锁），意味着**同一个空间的上传是串行的**——十个用户往同一个团队空间传图，得排队。对图片类应用，上传吞吐和延迟比"额度精确到字节"重要得多。为了堵住那 1MB 的溢出拖慢所有上传，不划算。
+
+**③ 额度是"软业务规则"，不是"硬安全约束"**
+
+| 场景 | 超额的后果 | 该用哪种校验 |
+|---|---|---|
+| **库存扣减** | 超卖 = 真金白银损失 | 必须强校验 |
+| **账户余额 / 支付** | 透支 = 钱没了 | 必须强校验 |
+| **空间额度** | 超几 MB 存储 = 几乎零成本 | **弱校验可接受** |
+
+空间额度超一点点，损失的是"一点点对象存储的便宜空间"，没有真实资金 / 法律风险。低违规成本 → 没必要上重锁。
+
+**④ 存储便宜**
+
+溢出的那点容量，在对象存储（COS / OSS）上成本几乎可以忽略。这是"影响不大"的经济底座。
+
+### 瞬间超额的原理：check-then-act 竞态
+
+上面线程 A/B/C 的例子就是经典的 **"检查-再-执行"竞态**：
+
+```
+检查阶段：多个线程同时读到"同一个旧值"，都判断"还没超"
+执行阶段：各自插入图片 + 累加 → 实际总和超出额度
+```
+
+要 100% 杜绝它，就得在"检查 + 累加"之间加锁 / 用原子操作（强校验），代价就是性能。本项目选择**接受这个小窗口**，事后兜底。
+
+### 兜底机制①：限流（把"瞬间"的口子收窄）
+
+给上传接口加限流（比如每用户每分钟最多 10 次上传）。作用是**限制竞态窗口内的并发量**——即使每次都漏检，限流把"一瞬间的并发上传数"卡死了，溢出量就被压在一个很小的范围内：
+
+```
+无限流：用户瞬间 1000 个并发请求 → 可能超 1000 张的量
+有限流：每分钟 10 次              → 最多超 10 张的量
+```
+
+### 兜底机制②：定时任务（把额度"重新对账"，最终一致）
+
+起一个定时任务（集群下要加分布式锁，前面笔记讲过），周期性地：
+
+1. 扫描所有空间，从 `picture` 表**重新汇总**每个空间的实际 `SUM(picSize)` 和 `COUNT(*)`；
+2. 和 space 表里存的 `totalSize` / `totalCount` 对比，**纠正偏差**（把存的不准的额度重新同步成真实值）；
+3. 标记出**超额的空间**，做定制处理：告警、阻止后续上传、降级空间、通知用户扩容……
+
+这就是"**最终一致**"——实时校验漏掉的，定时任务兜回来。哪怕某一刻空间真的超了，最迟在下个周期就会被发现和纠正。
+
+### 三个机制怎么配合
+
+```
+上传时（弱校验，挡住绝大多数正常情况）
+    ↓ 漏网之鱼（轻微超额）
+限流（把漏网量压到很小）
+    ↓
+定时任务（周期对账，纠正额度 + 处理超额空间）
+    → 最终一致 ✅
+```
+
+弱校验挡大头，限流压小头，定时任务收尾。三层配合，既快又稳。
+
+### 适用边界：什么时候绝不能用弱校验
+
+该方案成立的前提是**"违规成本低、可事后纠正"**。以下场景**必须强校验**：
+
+- ❌ **库存超卖 / 秒杀扣减** → DB `UPDATE ... SET stock=stock-1 WHERE stock>0` 或 Redis Lua 原子脚本
+- ❌ **账户扣款 / 转账** → 数据库行锁 + 事务
+- ❌ **优惠券领取防超发** → 原子操作
+
+> 这呼应项目里另一个地方：`addSpace` 用"加锁 + 事务"保证"一个用户一个私有空间"（那是个**硬约束**，不能违反，所以强校验）；而空间额度用弱校验——**同一个项目里，约束的"硬度"不同，手段就不同**。
+
+### 代码大概长什么样（弱校验 + 原子累加）
+
+```java
+// 上传图片到空间 —— 弱校验 + 原子累加
+public PictureVO uploadPictureToSpace(Long spaceId, ...) {
+    Space space = getById(spaceId);
+    long newSize = uploadResult.getPicSize();
+
+    // ① 弱校验：不加锁，粗略判断（有并发窗口，但不追求绝对精确）
+    if (space.getTotalSize() + newSize > space.getMaxSize()) {
+        throw new BusinessException(ErrorCode.OPERATION_ERROR, "空间容量不足");
+    }
+    if (space.getTotalCount() + 1 > space.getMaxCount()) {
+        throw new BusinessException(ErrorCode.OPERATION_ERROR, "空间数量超限");
+    }
+
+    // ② 保存图片
+    save(picture);
+
+    // ③ 更新额度：用 setSql 原子累加，避免计数器本身丢更新
+    update().eq("id", spaceId)
+            .setSql("totalSize = totalSize + " + newSize)
+            .setSql("totalCount = totalCount + 1")
+            .update();
+}
+```
+
+> ⚠️ 关键区分：**计数器更新是原子的**（`setSql("totalSize = totalSize + ?")` 在 DB 层加，不会丢更新），**只有"校验"那一步是松的**。所以额度数字本身不会错乱，只是"校验"可能放行几个本该拒绝的并发请求。
+
+### 经验教训
+
+1. **校验的"硬度"要和"违规成本"匹配**：资金 / 库存等高成本场景必须强校验，额度 / 配额等低成本场景可以弱校验 + 兜底，别一刀切上重锁。
+2. **"check-then-act"天然有竞态**：检查和执行之间没锁就有窗口，要么加锁堵死（强校验），要么接受溢出事后兜底（弱校验），二选一，别假装没这个窗口。
+3. **最终一致的三件套**：弱校验（实时挡大头）+ 限流（压小溢出量）+ 定时任务（周期对账纠正），是处理"低风险软约束"的经典组合拳。
+4. **计数器更新要用原子操作**（`setSql("col = col + ?")`），别用"读出来 + 算 + 写回"的三步式，否则并发下计数器本身就会丢更新——这跟校验松不松是两个独立的问题。
+5. **加锁是手段不是目的**：本项目 `addSpace` 加锁（硬约束）、额度不加锁（软约束），体现的是"按约束硬度选手段"，而不是"处处加锁才安全"。
+
+---
+
+## 编程式事务进阶：精准控制回滚与提交（setRollbackOnly）
+
+承接前文"编程式事务 TransactionTemplate：谁负责回滚"。那篇只讲了**自动控制**（异常→回滚，return→提交），这里补充**手动控制 `status.setRollbackOnly()`** 以及完整的三种控制手段。
+
+### execute 的核心规则
+
+`transactionTemplate.execute(callback)` 的事务结局由三件事决定：
+
+| 回调里发生什么 | 事务结果 | 调用方收到 |
+|---|---|---|
+| 抛异常 | 回滚 | 异常（继续往上抛） |
+| 正常 return | 提交 | 返回值 |
+| `status.setRollbackOnly()` | 回滚（即使后面正常 return） | 返回值（无异常） |
+
+### 三种控制方式
+
+| 控制方式 | 怎么写 | 事务结果 | 异常是否抛出 | 调用方能否感知失败 |
+|---|---|---|---|---|
+| **抛异常** | `throw new BusinessException(...)` | 回滚 | ✅ 抛出 | ✅ 能（catch / 全局异常处理器） |
+| **setRollbackOnly** | `status.setRollbackOnly(); return 标识值;` | 回滚 | ❌ 不抛 | ⚠️ 只能靠返回值判断 |
+| **正常 return** | `return 值;` | 提交 | — | — |
+
+### status 对象：手动控制的手柄
+
+回调的 `status` 是个 `TransactionStatus`，提供手动控制 API：
+
+- `status.setRollbackOnly()` —— 手动标记回滚（不抛异常）
+- `status.isRollbackOnly()` —— 查是否已被标记回滚
+- `status.isCompleted()` —— 查事务是否已结束
+- `status.isNewTransaction()` —— 查是不是新事务（嵌套事务时用）
+
+### 关键认知：setRollbackOnly 回滚的是"整个事务"，不能保留一部分
+
+`setRollbackOnly()` 标记的是**当前整个事务**回滚。所以：
+
+```java
+transactionTemplate.execute(status -> {
+    step1();                       // 已执行
+    if (某条件) {
+        status.setRollbackOnly();  // ← 标记回滚
+        return null;
+    }
+    step2();
+    return true;
+});
+```
+
+→ step1 和 step2 **全部回滚**，不存在"保留 step1、放弃 step2"。**事务的本质就是全成或全退，做不到保留一半。**
+
+### 抛异常 vs setRollbackOnly 的真正区别
+
+两者**数据结果完全相同**（都是整个事务回滚），唯一区别在**失败信号怎么传递**：
+
+- **抛异常**：回滚 + 把异常抛给调用方 → 调用方靠 catch 感知失败。
+- **setRollbackOnly + return**：回滚 + 返回一个值（不抛）→ 调用方靠返回值判断。
+
+> ⚠️ 用 `setRollbackOnly` 时：调用方拿不到异常，**必须通过返回值（如返回 null / false / 业务标识）告诉它失败了**，否则调用方可能误以为成功。
+
+### setRollbackOnly 的正当用法
+
+适合"想回滚、但不想用异常控制流程、想用返回值表达业务结果"的场景：
+
+```java
+String result = transactionTemplate.execute(status -> {
+    step1();
+    if (!业务条件满足) {
+        status.setRollbackOnly();      // 条件不满足 → 回滚 step1
+        return "CONDITION_NOT_MET";     // 用返回值（而非异常）表达结果
+    }
+    step2();
+    return "SUCCESS";
+});
+// 根据返回值分支处理，不依赖异常控制流
+```
+
+### 当前 deletePicture 代码的控制分析（纯自动控制）
+
+```java
+transactionTemplate.execute(status -> {
+    boolean result = this.removeById(pictureId);
+    ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);            // ① 删失败 → 抛 → 回滚
+    Long spaceId = oldPicture.getSpaceId();
+    if (spaceId != null) {
+        boolean update = spaceService.lambdaUpdate()
+                .eq(Space::getId, spaceId)
+                .setSql("totalSize = totalSize - " + oldPicture.getPicSize())
+                .setSql("totalCount = totalCount - 1")
+                .update();
+        ThrowUtils.throwIf(!update, ErrorCode.OPERATION_ERROR, "额度更新失败"); // ② 额度失败 → 抛 → 回滚
+    }
+    return true;                                                        // ③ 全成功 → 提交
+});
+```
+
+- 虽然写了 `status ->`，但**全程没用到 `status`** —— 纯"自动控制"，手动开关闲置。
+- 控制靠的是**抛异常点的位置**：删除图片和释放额度被绑成一个原子单元。
+- **② 的价值**：删除成功但额度更新失败 → 抛异常 → 回滚 → **删除也被撤销**，绝不会出现"图删了、额度没还"的中间状态。这就是事务原子性的保证。
+
+### 异常类型小坑（顺带，和 @Transactional 对比）
+
+| | 抛 RuntimeException | 抛 checked Exception |
+|---|---|---|
+| `@Transactional`（默认） | 回滚 | **不回滚**（默认提交），需配 `rollbackFor` 才回滚 |
+| `TransactionTemplate.execute` | 回滚 | 也回滚（包成 `UndeclaredThrowableException` 再抛） |
+
+但 `TransactionCallback` 接口方法**没声明 `throws`**，普通 lambda 只能抛 RuntimeException。所以 `ThrowUtils.throwIf` 抛的 `BusinessException`（继承 RuntimeException）走的是"RuntimeException → 回滚"，和 `@Transactional` 默认行为一致；checked 异常那条分支实际很少触发。
+
+### 经验教训
+
+1. **自动控制（默认）**：异常→回滚，正常 return→提交，够覆盖大多数场景（本项目 `deletePicture` 就用这种）。
+2. **手动控制 `setRollbackOnly`**：回滚整个事务但不抛异常，靠返回值表达结果——适合"想回滚但不想用异常控制流程"的场景。
+3. **事务是原子的**：`setRollbackOnly` 回滚全部，不存在"保留一部分"。想"部分成功"只能把那部分挪出事务（最终一致），那是另一个设计选择。
+4. **用 `setRollbackOnly` 必须用返回值通知失败**，否则调用方误以为成功。
+5. **回滚的本质是"撤销已执行的写操作"**：`removeById` 已执行，失败时靠事务回滚把它撤销——这就是事务防"中间态"的核心价值。
+
+---
+
+## 枚举转换的精简姿势：`@EnumValue` + `BeanUtil`
+
+补充前文"`@TableField(typeHandler = ...)`"那篇。那篇讲的是 MyBatis **原生**的枚举处理器（`EnumTypeHandler`/`EnumOrdinalTypeHandler`，要逐个字段标 `@TableField`）。这里讲更精简的 **MyBatis-Plus 专属注解 `@EnumValue`**，以及"枚举→VO"的属性复制法。
+
+### 先厘清：这是两个不同的转换
+
+```
+数据库(int: 0/1/2)  ←【转换 A】→  枚举(SpaceLevelEnum)  ←【转换 B】→  VO(SpaceLevel, 含 text/maxCount)
+```
+
+- **转换 A（库 ↔ 枚举）**：DB 只存数字，**有注解能全自动**（重点）
+- **转换 B（枚举 → VO）**：VO 比 DB 多了 text/maxCount 这些元数据，DB 帮不上，**靠属性复制**
+
+### 转换 A：库 ↔ 枚举 —— 用 `@EnumValue`（最精简，注解）
+
+MyBatis-Plus 内置枚举处理。在枚举里**标一下哪个字段对应数据库列**：
+
+```java
+import com.baomidou.mybatisplus.annotation.EnumValue;
+
+public enum SpaceLevelEnum {
+    COMMON("普通版", 0, 100, 100L * 1024 * 1024),
+    PROFESSIONAL("专业版", 1, 1000, 1000L * 1024 * 1024),
+    FLAGSHIP("旗舰版", 2, 10000, 10000L * 1024 * 1024);
+
+    private final String text;
+
+    @EnumValue          // ← 标记：这个 value 字段就是数据库存的那一列
+    private final int value;
+
+    private final long maxCount;
+    private final long maxSize;
+}
+```
+
+然后**实体里直接用枚举类型**，不再是 `Integer`：
+
+```java
+public class Space {
+    // 改前：private Integer spaceLevel;  (手动 getEnumByValue / getValue)
+    private SpaceLevelEnum spaceLevel;   // ← 直接枚举类型
+}
+```
+
+这样 MP 的 `MybatisEnumTypeHandler` **自动**完成双向转换：
+
+- 写库：`enum → 0/1/2`（取 `@EnumValue` 字段的值）
+- 读库：`0/1/2 → enum`（按 value 反查枚举）
+
+**全程不用写 `getEnumByValue()` / `getValue()`，一个注解搞定。**
+
+> 配置：MP 3.5.2+ 默认就用 `MybatisEnumTypeHandler`，一般不用配。老版本可在 yml 加：
+> `mybatis-plus.configuration.default-enum-type-handler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler`
+
+#### 三种枚举处理器对比（含原生）
+
+| 方式 | 库里存什么 | 稳不稳 | 精简度 |
+|------|-----------|--------|--------|
+| MyBatis `EnumTypeHandler` | 枚举**名字**（"COMMON"） | 稳，但占空间 | 要每个字段标 `@TableField(typeHandler=...)` |
+| MyBatis `EnumOrdinalTypeHandler` | 枚举**序号**（0/1/2，按定义顺序） | **不稳**，枚举换顺序数据就错 | 同上 |
+| **MP `@EnumValue`** ★ | 你指定的**业务值**（0/1/2） | **稳**（显式 value，不是序号） | **一个注解，最精简** |
+
+`@EnumValue` 既精简又比 `EnumOrdinalTypeHandler` 安全——存的是**业务 value 不是 ordinal**，枚举重排也不影响数据。
+
+#### 替代写法：`IEnum<T>` 接口（不用注解）
+
+不想加注解，就让枚举实现 MP 的 `IEnum` 接口，效果一样：
+
+```java
+public enum SpaceLevelEnum implements IEnum<Integer> {
+    ...;
+    @Override
+    public Integer getValue() { return value; }   // 告诉 MP 用这个值入库
+}
+```
+
+`@EnumValue` 和 `IEnum` 二选一，前者是注解、后者是接口，功能等价。
+
+### 转换 B：枚举 → VO —— 用属性复制
+
+VO（`SpaceLevel` 含 value/text/maxCount/maxSize）比 DB 丰富，DB 只能帮到 value，剩下三个字段得从枚举拿。精简法：
+
+#### 方法①：`BeanUtil.copyProperties`（Hutool，一行）
+
+枚举字段名（text/value/maxCount/maxSize）和 VO 字段名**完全对应**，按名字复制即可：
+
+```java
+// 单个
+SpaceLevel vo = BeanUtil.copyProperties(spaceLevelEnum, SpaceLevel.class);
+
+// 批量（返回所有级别给前端）
+List<SpaceLevel> list = Arrays.stream(SpaceLevelEnum.values())
+        .map(e -> BeanUtil.copyProperties(e, SpaceLevel.class))
+        .collect(Collectors.toList());
+```
+
+比手写 `new SpaceLevel(e.getValue(), e.getText(), e.getMaxCount(), e.getMaxSize())` 短，也不怕参数传反。
+
+#### 方法②：MapStruct（编译期生成，类型安全）
+
+字段多、转换频繁时，用 MapStruct 定义个接口，编译期自动生成转换代码：
+
+```java
+@Mapper
+public interface SpaceLevelMapper {
+    SpaceLevel toVO(SpaceLevelEnum enumValue);
+    List<SpaceLevel> toVOList(List<SpaceLevelEnum> list);
+}
+```
+
+调用：`spaceLevelMapper.toVO(enumValue)`。性能最好（纯 getter/setter，没有反射），但要引依赖 + 写接口。
+
+### 套到本项目的改造
+
+现状（`Space.spaceLevel` 是 `Integer`，全手动）：
+
+```java
+// 读库后手动转枚举
+SpaceLevelEnum levelEnum = SpaceLevelEnum.getEnumByValue(space.getSpaceLevel());
+// 手动构造 VO
+new SpaceLevel(enum.getValue(), enum.getText(), enum.getMaxCount(), enum.getMaxSize());
+```
+
+改造后：
+
+```java
+// 1. 枚举加 @EnumValue，实体改成枚举类型 → 库↔枚举全自动，干掉 getEnumByValue
+private SpaceLevelEnum spaceLevel;
+
+// 2. 枚举→VO 用 BeanUtil → 干掉手写构造
+BeanUtil.copyProperties(spaceLevelEnum, SpaceLevel.class)
+```
+
+两步都从"手动"变"自动 / 一行"。
+
+### 经验教训
+
+1. **`@EnumValue` 是枚举映射库列的"官方精简法"**：标记哪个字段入库，实体直接用枚举类型，MP 自动双向转换，省掉所有 `getEnumByValue`/`getValue` 手写代码。
+2. **存业务 value，别存 ordinal**：`@EnumValue` 存的是显式 value（0/1/2），枚举重排数据不变；`EnumOrdinalTypeHandler` 存的是位置序号，重排就错——能用 `@EnumValue` 就别用 ordinal。
+3. **"枚举→VO"和"库↔枚举"是两件事**：`@EnumValue` 只管后者；VO 因为比 DB 多字段（text/maxCount 等元数据），仍需 `BeanUtil`/`MapStruct` 复制，别指望一个注解包打天下。
+4. **属性复制靠"字段同名"**：`BeanUtil.copyProperties` 能一行转换的前提是枚举和 VO 字段名、类型对得上；对不上时要么改名、要么手写，别强行用。
+5. **MyBatis-Plus 的注解优于 MyBatis 原生**：`@EnumValue`（MP）比逐字段标 `@TableField(typeHandler=EnumTypeHandler.class)`（原生）更省、更安全，能用就用。

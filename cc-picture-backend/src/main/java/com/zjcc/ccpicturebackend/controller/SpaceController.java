@@ -16,6 +16,8 @@ import com.zjcc.ccpicturebackend.model.dto.space.SpaceQueryRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceUpdateRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
+import com.zjcc.ccpicturebackend.model.enums.SpaceLevelEnum;
+import com.zjcc.ccpicturebackend.model.vo.SpaceLevel;
 import com.zjcc.ccpicturebackend.model.vo.SpaceVO;
 import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.service.UserService;
@@ -25,7 +27,10 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpServletRequest;
+import java.util.Arrays;
 import java.util.Date;
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
@@ -190,7 +195,21 @@ public class SpaceController {
         return ResultUtils.success(spaceService.getSpaceVOPage(spacePage, request));
     }
 
-
+    /**
+     * 前端展示所有的空间级别信息
+     * @return
+     */
+    @GetMapping("/list/level")
+    public BaseResponse<List<SpaceLevel>> listSpaceLevel() {
+        List<SpaceLevel> spaceLevelList = Arrays.stream(SpaceLevelEnum.values()) // 获取所有枚举
+                .map(spaceLevelEnum -> new SpaceLevel(
+                        spaceLevelEnum.getValue(),
+                        spaceLevelEnum.getText(),
+                        spaceLevelEnum.getMaxCount(),
+                        spaceLevelEnum.getMaxSize()))
+                .collect(Collectors.toList());
+        return ResultUtils.success(spaceLevelList);
+    }
 
 
 }
