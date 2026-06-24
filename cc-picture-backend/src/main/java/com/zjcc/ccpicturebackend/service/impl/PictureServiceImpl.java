@@ -526,12 +526,29 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         ThrowUtils.throwIf(oldPicture == null,ErrorCode.NOT_FOUND_ERROR);
         // 校验权限
         checkPictureAuth(loginUser,oldPicture);
-        boolean result = this.removeById(pictureId);
-        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+        // 删除图片时，要释放额度 事务
+        transactionTemplate.execute(status -> {
+            boolean result = this.removeById(pictureId);
+            ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+            // 释放额度
+            Long spaceId = oldPicture.getSpaceId();
+            if (spaceId != null) {
+                boolean update = spaceService.lambdaUpdate()
+                        .eq(Space::getId, spaceId)
+                        .setSql("totalSize = totalSize - " + oldPicture.getPicSize())
+                        .setSql("totalCount = totalCount - 1")
+                        .update();
+                ThrowUtils.throwIf(!update, ErrorCode.OPERATION_ERROR, "额度更新失败");
+            }
+            return true;
+        });
         // 异步清理文件
         // this.clearPictureFile(oldPicture); // 同类调用 异步失效
 
         // 改成(走代理,异步生效):
+        // 可能出现对象存储上的图片文件实际没被清理的情况。
+        // 但是对于用户来说，不应该感受到 “删了图片空间却没有增加”，所以没有将这一步添加到事务中。
+        // TODO 可以通过定时任务检测作为补偿措施
         ((PictureService) AopContext.currentProxy()).clearPictureFile(oldPicture);
     }
 
