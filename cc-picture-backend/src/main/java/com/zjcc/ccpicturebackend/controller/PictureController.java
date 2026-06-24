@@ -204,14 +204,14 @@ public class PictureController {
         ThrowUtils.throwIf(pageSize > 20, ErrorCode.PARAMS_ERROR);
         // v3.0 空间权限校验
         Long spaceId = pictureQueryRequest.getSpaceId();
-        // 公开图库
+        // v3.0 公开图库
         if (spaceId == null) {
             // 普通用户默认只能查看已过审的公开数据
             // v2.0 增加审核 默认只能查看已过审的数据
             pictureQueryRequest.setReviewStatus(PictureReviewStatusEnum.PASS.getValue());
             pictureQueryRequest.setNullSpaceId(true);
         } else {
-            // 私有空间 本人才能查看
+            // v3.0 私有空间 本人才能查看
             User loginUser = userService.getLoginUser(request);
             Space space = spaceService.getById(spaceId);
             ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");

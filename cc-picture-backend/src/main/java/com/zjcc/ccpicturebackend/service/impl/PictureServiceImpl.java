@@ -11,7 +11,6 @@ import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.manager.CosManager;
-import com.zjcc.ccpicturebackend.manager.FileManager;
 import com.zjcc.ccpicturebackend.manager.upload.FilePictureUpload;
 import com.zjcc.ccpicturebackend.manager.upload.PictureUploadTemplate;
 import com.zjcc.ccpicturebackend.manager.upload.UrlPictureUpload;
@@ -37,6 +36,7 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -75,6 +75,9 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
     @Resource
     private SpaceService spaceService;
 
+    @Resource
+    private TransactionTemplate transactionTemplate;
+
     @Override
     public PictureVO uploadPicture(Object inputSource, PictureUploadRequest pictureUploadRequest, User loginUser) {
         if (inputSource == null) {
@@ -95,6 +98,12 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             if (!loginUser.getId().equals(oldSpace.getUserId())) {
                 throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "没有空间权限");
             }
+            // v4.0 校验额度
+            ThrowUtils.throwIf(oldSpace.getTotalCount() >= oldSpace.getMaxCount(),
+                    ErrorCode.OPERATION_ERROR, "空间条数不足");
+            ThrowUtils.throwIf(oldSpace.getTotalSize() >= oldSpace.getMaxSize(),
+                    ErrorCode.OPERATION_ERROR, "空间大小不足");
+
         }
         // 判断新增还是更新图片
         Long pictureId = null;
@@ -183,8 +192,20 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             picture.setId(pictureId);
             picture.setEditTime(new Date());
         }
-        boolean result = this.saveOrUpdate(picture);
-        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR, "图片上传失败");
+        // v4.0 开启事务 更新额度，如果额度更新失败，也不用将图片记录保存
+        Long finalSpaceId = spaceId;
+        transactionTemplate.execute(status -> {
+            boolean result = this.saveOrUpdate(picture);
+            ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR, "图片上传失败");
+            if (finalSpaceId != null) {
+                boolean update = spaceService.lambdaUpdate().eq(Space::getId, finalSpaceId)
+                        .setSql("totalSize = totalSize + " + picture.getPicSize())
+                        .setSql("totalCount = totalCount + 1")
+                        .update();
+                ThrowUtils.throwIf(!update, ErrorCode.OPERATION_ERROR, "额度更新失败");
+            }
+            return null;
+        });
         log.info("图片上传成功，图片ID = {}, URL = {}, 用户ID = {}", picture.getId(), picture.getUrl(), loginUser.getId());
         return PictureVO.objToVo(picture);
     }
