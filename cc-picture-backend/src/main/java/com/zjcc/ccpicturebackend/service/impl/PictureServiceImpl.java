@@ -181,6 +181,10 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         picture.setPicScale(uploadPictureResult.getPicScale());
         picture.setPicFormat(uploadPictureResult.getPicFormat());
         picture.setUserId(loginUser.getId());
+
+        // v5.0 图片色调
+        picture.setPicColor(uploadPictureResult.getPicColor());
+
         // 补充审核参数
         fillReviewParams(picture, loginUser);
         // 如果 pictureId 不为空，表示更新，否则是新增

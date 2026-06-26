@@ -23,10 +23,11 @@
             <result property="isDelete" column="isDelete" />
             <result property="thumbnailUrl" column="thumbnailUrl" jdbcType="VARCHAR"/>
             <result property="spaceId" column="spaceId" />
+            <result property="picColor" column="picColor" />
     </resultMap>
 
     <sql id="Base_Column_List">
-        id,url,thumbnailUrl,name,spaceId,introduction,category,tags,
+        id,url,thumbnailUrl,name,spaceId,picColor,introduction,category,tags,
         picSize,picWidth,picHeight,picScale,picFormat,
         userId,createTime,editTime,updateTime,isDelete
     </sql>
