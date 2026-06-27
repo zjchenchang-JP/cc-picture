@@ -3925,3 +3925,151 @@ BeanUtil.copyProperties(spaceLevelEnum, SpaceLevel.class)
 3. **"枚举→VO"和"库↔枚举"是两件事**：`@EnumValue` 只管后者；VO 因为比 DB 多字段（text/maxCount 等元数据），仍需 `BeanUtil`/`MapStruct` 复制，别指望一个注解包打天下。
 4. **属性复制靠"字段同名"**：`BeanUtil.copyProperties` 能一行转换的前提是枚举和 VO 字段名、类型对得上；对不上时要么改名、要么手写，别强行用。
 5. **MyBatis-Plus 的注解优于 MyBatis 原生**：`@EnumValue`（MP）比逐字段标 `@TableField(typeHandler=EnumTypeHandler.class)`（原生）更省、更安全，能用就用。
+
+---
+
+# 2026/06/27
+
+## SpEL（Spring Expression Language）
+
+### 是什么
+
+Spring 提供的**表达式语言**，在**运行时**解析表达式，动态访问/操作 Java 对象。用于在 Spring 配置文件或 Java
+代码中动态地查询和操作对象。支持属性访问、方法调用、运算、条件判断、集合处理、正则等。
+
+- **定界符**：`#{ 表达式 }`
+- **用在哪**：`@Value`、缓存注解（`@Cacheable`/`@CacheEvict`/`@CachePut` 的 key/condition）、`@PreAuthorize` 权限、编程式解析。
+
+### `#{}` vs `${}`（最容易混）
+
+| 写法             | 名字       | 作用                       | 例子                             |
+|----------------|----------|--------------------------|--------------------------------|
+| `${key}`       | 属性占位符    | 读配置文件/环境变量的**值**，启动时替换   | `@Value("${server.port}")`     |
+| `#{expr}`      | SpEL 表达式 | **运行时**计算表达式（访问对象/方法/运算） | `@Value("#{user.name}")`       |
+| `#{ ${list} }` | 混用       | 先 `${}` 取配置值，再 SpEL 解析   | `@Value("#{${my.config:{}}}")` |
+
+一句话：`${}` 取"死的配置值"，`#{}` 算"活的运行时表达式"。
+
+### 表达式语法（通用）
+
+| 功能         | 写法                                        | 说明                  |
+|------------|-------------------------------------------|---------------------|
+| 字面量        | `'hello'`、`123`、`true`、`null`             | 字符串用单引号             |
+| 属性访问       | `user.name` / `person.address.city`       | 等价调 getName()，支持嵌套  |
+| 方法调用       | `user.getFullName()`、`'abc'.length()`     | 任意 public 方法        |
+| 算术         | `1 + 2`、`a * b`、`10 mod 3`                | `mod`/`div` 是关键字写法  |
+| 关系/逻辑      | `user.age > 18`、`a and b`、`not flag`      | `and`/`or`/`not`    |
+| 三元         | `cond ? a : b`                            | 条件表达式               |
+| Elvis（空兜底） | `name ?: '匿名'`                            | name 为 null 时取 '匿名' |
+| 集合元素       | `list[0]`、`map['key']`                    | 下标/键访问              |
+| 集合过滤       | `list.?[age > 18]`                        | 选出 age>18 的元素       |
+| 集合投影       | `list.![name]`                            | 取每个元素的 name 组成新集合   |
+| 正则         | `'abc123' matches '\d+'`                  | 返回 boolean          |
+| 类型/静态      | `T(java.lang.Math).PI`、`T(Math).random()` | 引用静态字段/方法           |
+
+### 缓存注解里的 SpEL（最常用）
+
+`@Cacheable` / `@CacheEvict` / `@CachePut` 的 `key`、`condition`、`unless` 都是 SpEL，Spring 给了一套**专用上下文变量**：
+
+#### 专用变量
+
+| 变量                 | 含义                                                   | 例子                         |
+|--------------------|------------------------------------------------------|----------------------------|
+| `#参数名`             | 方法的某个参数（按名）                                          | `#userId`、`#locale`        |
+| `#a0` / `#p0`      | 第几个参数（按下标，防参数名丢失）                                    | `#a0`                      |
+| `#root.methodName` | 当前方法名                                                | 拼 key 用                    |
+| `#root.target`     | 当前目标对象                                               |                            |
+| `#root.args`       | 全部参数数组                                               | `#root.args[0]`            |
+| `#result`          | 方法返回值（`@Cacheable` 不可用，`@CachePut`/`@CacheEvict` 可用） | `unless="#result == null"` |
+
+#### 例子拆解
+
+```java
+
+@Cacheable(value = "users", key = "#userId + ':' + #locale")
+public String getUserInfo(Long userId, String locale) { ...}
+```
+
+- `value = "users"`：缓存空间名（理解为"表名"）
+- `key = "#userId + ':' + #locale"`：SpEL 把**参数 userId、locale** 拼成 key，如 `123:zh`
+- 第一次调用走方法、结果存入 `users::123:zh`；下次同样参数直接命中缓存、不进方法
+
+#### 常见 key 写法
+
+```java
+// 单参数
+@Cacheable(value = "user", key = "#id")
+User getById(Long id);
+
+// 参数对象的属性
+@Cacheable(value = "pic", key = "#query.spaceId + ':' + #query.current")
+Page<Picture> list(PictureQueryRequest query);
+
+// 复合 + 用 root 防参数名丢失
+@Cacheable(value = "pic", key = "#root.methodName + ':' + #a0")
+Picture get(Long id);
+
+// 条件缓存：返回值非空才缓存
+@Cacheable(value = "user", key = "#id", unless = "#result == null")
+
+// 清缓存
+@CacheEvict(value = "user", key = "#id")            // 删单个
+@CacheEvict(value = "user", allEntries = true)        // 清整个空间
+```
+
+### `@Value` 里用 SpEL
+
+```java
+// 读系统属性，空则兜底 8080
+@Value("#{systemProperties['server.port'] ?: 8080}")
+private int port;
+
+// 引用容器里另一个 bean 的字段（bean 名前加 @）
+@Value("#{ @pictureConfig.maxSize }")
+private long maxSize;
+
+// 调静态方法
+@Value("#{ T(java.lang.Math).random() * 100 }")
+private double seed;
+```
+
+### 编程式使用（不依赖注解）
+
+```java
+ExpressionParser parser = new SpelExpressionParser();
+
+// 简单求值
+String hello = parser.parseExpression("'Hello '.concat('World')").getValue(String.class);
+
+// 绑定到对象，访问其属性
+User user = new User("zjc", 25);
+StandardEvaluationContext ctx = new StandardEvaluationContext(user);
+String name = parser.parseExpression("name").getValue(ctx, String.class);                      // zjc
+String adult = parser.parseExpression("age > 18 ? 'Adult' : 'Child'").getValue(ctx, String.class); // Adult
+```
+
+### 实战（贴合本项目）
+
+```java
+// 缓存图片列表（按空间 + 页码）
+@Cacheable(value = "picture:list", key = "#spaceId + ':' + #current", unless = "#result == null")
+public Page<Picture> listPictures(Long spaceId, long current) { ...}
+
+// 更新图片后，清掉该空间的列表缓存
+@CacheEvict(value = "picture:list", allEntries = true)
+public void uploadPicture(...) { ...}
+
+// 缓存单个用户
+@Cacheable(value = "user", key = "#userId")
+public User getUser(Long userId) { ...}
+```
+
+### 注意事项 / 坑
+
+1. **注解里 SpEL 是字符串**：`key = "#userId + ':' + #locale"`，整个值用双引号，内部字符串用单引号 `':'`。
+2. **`#{}` 在缓存注解里可省略**：`@Cacheable(key = "#id")` 直接写 `#id`，不需要 `#{}`；但 `@Value` 里**必须**写 `#{}`。
+3. **参数名可能丢失**：编译时不加 `-parameters`，`#userId` 解析不到 → 改用 `#a0`/`#p0`（按下标，最稳）。Spring Boot 默认开了
+   `-parameters`，一般没问题。
+4. **`#result` 在 `@Cacheable` 不可用**：因为它可能在方法执行前就返回缓存，没有 result。`@CachePut`/`unless` 才能用。
+5. **`${}` 是启动时替换、`#{}` 是运行时计算**：想在 `@Value` 里读配置再计算，用 `#{ ${...} }` 嵌套。
+6. **别滥用编程式 SpEL**：能写普通 Java 就别用 SpEL，它牺牲编译期检查、不好调试、且有注入风险（用户输入拼进表达式很危险）。

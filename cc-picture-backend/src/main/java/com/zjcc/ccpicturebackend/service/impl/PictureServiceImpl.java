@@ -37,6 +37,7 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -627,6 +628,48 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 转换VO
         // 转为 PictureVO 时，不要调用 service 中的转换方法(会额外查询用户信息,没必要)
         return sortedList.stream().map(PictureVO::objToVo).collect(Collectors.toList());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class) // 确保批量操作具有原子性，如果有一条更新失败，那么需要对这一批操作进行回滚，避免数据不一致
+    public void editPictureByBatch(PictureEditByBatchRequest pictureEditByBatchRequest,
+                                         User loginUser) {
+        // 1 参数校验
+        List<Long> pictureIdList = pictureEditByBatchRequest.getPictureIdList();
+        Long spaceId = pictureEditByBatchRequest.getSpaceId();
+        String category = pictureEditByBatchRequest.getCategory();
+        List<String> tags = pictureEditByBatchRequest.getTags();
+        ThrowUtils.throwIf(CollUtil.isEmpty(pictureIdList) || spaceId == null, ErrorCode.PARAMS_ERROR);
+        ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
+        // 2 校验空间权限
+        Space space = spaceService.getById(spaceId);
+        ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
+        ThrowUtils.throwIf(space.getUserId().equals(loginUser.getId()), ErrorCode.NO_AUTH_ERROR, "没有空间访问权限");
+        // 3 查询指定图片 只查询需要的字段
+        List<Picture> pictureList = this.lambdaQuery().select(Picture::getId, Picture::getSpaceId)
+                .eq(Picture::getSpaceId, spaceId)
+                .in(Picture::getId, pictureIdList)
+                .list();
+        if (pictureIdList.isEmpty()) {
+            return;
+        }
+        // 4 批量更新分类和标签
+        pictureList.forEach(picture -> {
+            if (StrUtil.isNotBlank(category)) {
+                picture.setCategory(category);
+            }
+            if (CollUtil.isNotEmpty(tags)) {
+                // Java: List<String> tags = ["风景", "自然", "山水"]
+                //     ↓ JSONUtil.toJsonStr(tags)
+                // String: "[\"风景\",\"自然\",\"山水\"]"   ← 存进数据库 tags 字段(varchar)
+                //     ↓ JSONUtil.toList(tags, String.class) 读取时
+                // Java: List<String> tags = ["风景", "自然", "山水"]
+                picture.setTags(JSONUtil.toJsonStr(tags));
+            }
+        });
+        // 5 批量更新
+        boolean result = this.updateBatchById(pictureList);
+        ThrowUtils.throwIf(!result,ErrorCode.OPERATION_ERROR);
     }
 
 }
