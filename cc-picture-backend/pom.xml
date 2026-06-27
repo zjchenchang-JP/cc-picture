@@ -63,6 +63,12 @@
             <artifactId>cos_api</artifactId>
             <version>5.6.227</version>
         </dependency>
+        <!-- 阿里云百炼 https://mvnrepository.com/artifact/com.alibaba/dashscope-sdk-java -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>dashscope-sdk-java</artifactId>
+            <version>2.22.20</version>
+        </dependency>
         <!-- HTML 解析：https://jsoup.org/ -->
         <!-- 支持使用跟前端一致的选择器语法来定位 HTML 的元素，比如类选择器、CSS 选择器 -->
         <!-- 提取HTML中的 图片地址-->
