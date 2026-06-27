@@ -26,6 +26,7 @@ import com.zjcc.ccpicturebackend.service.PictureService;
 import com.zjcc.ccpicturebackend.mapper.PictureMapper;
 import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.service.UserService;
+import com.zjcc.ccpicturebackend.utils.ColorSimilarUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -43,11 +44,10 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+import java.awt.*;
 import java.io.IOException;
-import java.util.Date;
-import java.util.HashMap;
+import java.util.*;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -584,6 +584,49 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 操作数据库
         boolean result = this.updateById(picture);
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+    }
+
+    @Override
+    public List<PictureVO> searchPictureByColor(Long spaceId, String picColor, User loginUser) {
+        // 1 校验参数
+        ThrowUtils.throwIf(spaceId == null || StrUtil.isBlank(picColor), ErrorCode.PARAMS_ERROR);
+        ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
+        // 2 校验空间权限
+        Space space = spaceService.getById(spaceId);
+        ThrowUtils.throwIf(space == null,ErrorCode.PARAMS_ERROR,"空间不存在");
+        ThrowUtils.throwIf(!space.getUserId().equals(loginUser.getId()),ErrorCode.NO_AUTH_ERROR,"没有空间访问权限");
+        // 3 查询该空间下所有图片（必须有主色调）
+        List<Picture> pictureList = this.lambdaQuery().eq(Picture::getSpaceId, spaceId)
+                .isNotNull(Picture::getPicColor)// 非 null
+                .ne(Picture::getPicColor, "") // 非空串
+                .list();
+        // 如果没有图片 返回空列表
+        if (CollectionUtils.isEmpty(pictureList)) {
+            return Collections.emptyList(); // 源码 不可变对象
+        }
+        // 将目标颜色转为 Color 对象
+        // 提前把目标颜色从字符串转为 color 对象，而不是每计算一张图都重新转换一次对象
+        Color targetColor = Color.decode(picColor);
+        // 4 计算颜色相似度并排序
+        List<Picture> sortedList = pictureList.stream()
+                .sorted(Comparator.comparingDouble(picture -> {
+                    // 提取主色调属性
+                    String hexColor  = picture.getPicColor();
+                    // 没有主色调的图片放到最后
+                    if (StrUtil.isBlank(hexColor)) {
+                        return Double.MAX_VALUE;
+                    }
+                    Color pictureColor = Color.decode(hexColor);
+                    // 相似度 越大越相似
+                    double similarity = ColorSimilarUtils.calculateSimilarity(targetColor, pictureColor);
+                    // 取负 降序排序 相似度最高排在最前
+                    return -similarity;
+                }))
+                .limit(12)
+                .collect(Collectors.toList());
+        // 转换VO
+        // 转为 PictureVO 时，不要调用 service 中的转换方法(会额外查询用户信息,没必要)
+        return sortedList.stream().map(PictureVO::objToVo).collect(Collectors.toList());
     }
 
 }

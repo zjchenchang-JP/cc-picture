@@ -15,7 +15,6 @@ import com.zjcc.ccpicturebackend.constant.UserConstant;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
-import com.zjcc.ccpicturebackend.manager.FileManager;
 import com.zjcc.ccpicturebackend.model.dto.picture.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.Space;
@@ -36,7 +35,6 @@ import org.springframework.web.multipart.MultipartFile;
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import java.util.Arrays;
-import java.util.Date;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -355,7 +353,7 @@ public class PictureController {
     }
 
     /**
-     * 批量抓取和创建图片
+     * 批量抓取和上传图片
      *
      * @param pictureUploadByBatchRequest
      * @param request
@@ -372,5 +370,20 @@ public class PictureController {
         return ResultUtils.success(uploadCount);
     }
 
-
+    /**
+     * 按颜色搜索
+     * @param colorRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/search/color")
+    public BaseResponse<List<PictureVO>> searchPictureByColor(SearchPictureByColorRequest colorRequest,
+                                                              HttpServletRequest request) {
+        ThrowUtils.throwIf(colorRequest == null, ErrorCode.PARAMS_ERROR);
+        Long spaceId = colorRequest.getSpaceId();
+        String picColor = colorRequest.getPicColor();
+        User loginUser = userService.getLoginUser(request);
+        List<PictureVO> result = pictureService.searchPictureByColor(spaceId, picColor, loginUser);
+        return ResultUtils.success(result);
+    }
 }
