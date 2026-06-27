@@ -20,6 +20,7 @@ import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.PictureReviewStatusEnum;
+import com.zjcc.ccpicturebackend.model.vo.BatchEditResult;
 import com.zjcc.ccpicturebackend.model.vo.PictureVO;
 import com.zjcc.ccpicturebackend.model.vo.UserVO;
 import com.zjcc.ccpicturebackend.service.PictureService;
@@ -34,14 +35,11 @@ import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.BeanUtils;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
-import org.springframework.util.StringUtils;
-import org.springframework.web.multipart.MultipartFile;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
@@ -49,6 +47,8 @@ import java.awt.*;
 import java.io.IOException;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 /**
@@ -634,18 +634,15 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
     @Transactional(rollbackFor = Exception.class) // 确保批量操作具有原子性，如果有一条更新失败，那么需要对这一批操作进行回滚，避免数据不一致
     public void editPictureByBatch(PictureEditByBatchRequest pictureEditByBatchRequest,
                                          User loginUser) {
-        // 1 参数校验
-        List<Long> pictureIdList = pictureEditByBatchRequest.getPictureIdList();
+        // 1 参数和权限校验
         Long spaceId = pictureEditByBatchRequest.getSpaceId();
+        List<Long> pictureIdList = validateBatchEditRequest(pictureEditByBatchRequest, spaceId, loginUser);
+
         String category = pictureEditByBatchRequest.getCategory();
         List<String> tags = pictureEditByBatchRequest.getTags();
-        ThrowUtils.throwIf(CollUtil.isEmpty(pictureIdList) || spaceId == null, ErrorCode.PARAMS_ERROR);
-        ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
-        // 2 校验空间权限
-        Space space = spaceService.getById(spaceId);
-        ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
-        ThrowUtils.throwIf(space.getUserId().equals(loginUser.getId()), ErrorCode.NO_AUTH_ERROR, "没有空间访问权限");
-        // 3 查询指定图片 只查询需要的字段
+        String nameRule = pictureEditByBatchRequest.getNameRule();
+
+        // 2 查询指定图片 只查询需要的字段
         List<Picture> pictureList = this.lambdaQuery().select(Picture::getId, Picture::getSpaceId)
                 .eq(Picture::getSpaceId, spaceId)
                 .in(Picture::getId, pictureIdList)
@@ -653,7 +650,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         if (pictureIdList.isEmpty()) {
             return;
         }
-        // 4 批量更新分类和标签
+        // 3 批量更新分类和标签
         pictureList.forEach(picture -> {
             if (StrUtil.isNotBlank(category)) {
                 picture.setCategory(category);
@@ -667,9 +664,145 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
                 picture.setTags(JSONUtil.toJsonStr(tags));
             }
         });
-        // 5 批量更新
+        fillPictureWithNameRule(pictureList,nameRule);
+        // 4 批量更新
         boolean result = this.updateBatchById(pictureList);
         ThrowUtils.throwIf(!result,ErrorCode.OPERATION_ERROR);
+    }
+
+    private List<Long> validateBatchEditRequest(PictureEditByBatchRequest pictureEditByBatchRequest, Long spaceId, User loginUser) {
+        // 1 参数校验
+        List<Long> pictureIdList = pictureEditByBatchRequest.getPictureIdList();
+        ThrowUtils.throwIf(CollUtil.isEmpty(pictureIdList) || spaceId == null, ErrorCode.PARAMS_ERROR);
+        ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
+        // 2 校验空间权限
+        Space space = spaceService.getById(spaceId);
+        ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
+        ThrowUtils.throwIf(space.getUserId().equals(loginUser.getId()), ErrorCode.NO_AUTH_ERROR, "没有空间访问权限");
+        return pictureIdList;
+    }
+
+    @Resource
+    private Executor ccPictureExecutor; // 注入自定义线程池
+
+    // 一次处理100 个
+    private static final int BATCH_SIZE = 100;
+
+    @Override
+    public BatchEditResult batchEditPictureMetadata(PictureEditByBatchRequest pictureEditByBatchRequest, User loginUser) {
+        // 1 参数校验
+        Long spaceId = pictureEditByBatchRequest.getSpaceId();
+        List<Long> pictureIdList = validateBatchEditRequest(pictureEditByBatchRequest, spaceId, loginUser);
+
+        String category = pictureEditByBatchRequest.getCategory();
+        List<String> tags = pictureEditByBatchRequest.getTags();
+
+        // 2 查询空间下的图片 只查询需要的字段
+        List<Picture> pictureList = this.lambdaQuery()
+                .select(Picture::getId, Picture::getSpaceId)
+                .eq(Picture::getSpaceId, spaceId)
+                .in(Picture::getId, pictureIdList)
+                .list();
+        if (pictureList.isEmpty()) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "指定的图片不存在或不属于该空间");
+        }
+        // 批量编辑图片名(主线程同步编号, 全局顺序, 不能进并发任务)
+        String nameRule = pictureEditByBatchRequest.getNameRule();
+        this.fillPictureWithNameRule(pictureList, nameRule);
+
+        // 3 分批异步处理: 每批 try-catch, 失败不中断、记录失败的 pictureId
+        //    放弃外层统一事务, 走"尽力而为 + 最终一致", 失败的留给前端按 failedPictureIds 重试
+        List<CompletableFuture<BatchResult>> futureList = new ArrayList<>();
+        for (int i = 0; i < pictureList.size(); i += BATCH_SIZE) {
+            List<Picture> batch = pictureList.subList(i, Math.min(i + BATCH_SIZE, pictureList.size()));
+            CompletableFuture<BatchResult> future = CompletableFuture.supplyAsync(() -> {
+                try {
+                    batch.forEach(picture -> {
+                        if (StrUtil.isNotBlank(category)) {
+                            picture.setCategory(category);
+                        }
+                        if (CollUtil.isNotEmpty(tags)) {
+                            picture.setTags(JSONUtil.toJsonStr(tags));
+                        }
+                    });
+                    ThrowUtils.throwIf(!this.updateBatchById(batch), ErrorCode.OPERATION_ERROR, "批量编辑失败");
+                    return BatchResult.ok(batch.size());
+                } catch (Exception e) {
+                    List<Long> failedIds = batch.stream().map(Picture::getId).collect(Collectors.toList());
+                    log.error("批次处理失败, 失败图片 id={}", failedIds, e);
+                    return BatchResult.fail(failedIds, e.getMessage());
+                }
+            }, ccPictureExecutor);
+            futureList.add(future);
+        }
+        // 4 等所有批次完成(内部已 catch, 这里不会抛)
+        CompletableFuture.allOf(futureList.toArray(new CompletableFuture[0])).join();
+
+        // 5 汇总结果, 返回成功/失败明细(不回滚已成功的批次)
+        int successCount = 0;
+        List<Long> failedPictureIds = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        for (CompletableFuture<BatchResult> future : futureList) {
+            BatchResult r = future.join();
+            successCount += r.successCount;
+            failedPictureIds.addAll(r.failedIds);
+            if (StrUtil.isNotBlank(r.error)) {
+                errors.add(r.error);
+            }
+        }
+        log.info("批量编辑完成: 成功 {} 条, 失败 {} 条", successCount, failedPictureIds.size());
+
+        BatchEditResult result = new BatchEditResult();
+        result.setSuccessCount(successCount);
+        result.setFailedCount(failedPictureIds.size());
+        result.setFailedPictureIds(failedPictureIds);
+        result.setErrors(errors);
+        return result;
+    }
+
+    /**
+     * 单批次处理结果(内部使用)
+     */
+    private static class BatchResult {
+        final int successCount;
+        final List<Long> failedIds;
+        final String error;
+
+        private BatchResult(int successCount, List<Long> failedIds, String error) {
+            this.successCount = successCount;
+            this.failedIds = failedIds;
+            this.error = error;
+        }
+
+        static BatchResult ok(int successCount) {
+            return new BatchResult(successCount, Collections.emptyList(), null);
+        }
+
+        static BatchResult fail(List<Long> failedIds, String error) {
+            return new BatchResult(0, failedIds, error);
+        }
+    }
+
+    /**
+     * 批量重命名
+     * nameRule 格式：图片{序号}
+     * @param pictureList
+     * @param nameRule
+     */
+    private void fillPictureWithNameRule(List<Picture> pictureList, String nameRule) {
+        if (CollUtil.isEmpty(pictureList) || StrUtil.isBlank(nameRule)) {
+            return;
+        }
+        long count = 1;
+        try {
+            for (Picture picture : pictureList) {
+                String pictureName = nameRule.replaceAll("\\{序号}", String.valueOf(count++));
+                picture.setName(pictureName);
+            }
+        } catch (Exception e) {
+            log.error("名称解析错误", e);
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "名称解析错误");
+        }
     }
 
 }

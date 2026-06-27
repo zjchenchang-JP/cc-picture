@@ -20,6 +20,7 @@ import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.PictureReviewStatusEnum;
+import com.zjcc.ccpicturebackend.model.vo.BatchEditResult;
 import com.zjcc.ccpicturebackend.model.vo.PictureTagCategory;
 import com.zjcc.ccpicturebackend.model.vo.PictureVO;
 import com.zjcc.ccpicturebackend.service.PictureService;
@@ -400,5 +401,21 @@ public class PictureController {
         pictureService.editPictureByBatch(pictureEditByBatchRequest, loginUser);
         return ResultUtils.success(true);
     }
+
+    /**
+     * 大数据量 批量修改
+     * @param req
+     * @param request
+     * @return
+     */
+    @PostMapping("/edit/batch/metadata")
+    public BaseResponse<BatchEditResult> batchEditPictureMetadata(@RequestBody PictureEditByBatchRequest req,
+                                                              HttpServletRequest request) {
+        ThrowUtils.throwIf(req == null, ErrorCode.PARAMS_ERROR);
+        User loginUser = userService.getLoginUser(request);
+        BatchEditResult result = pictureService.batchEditPictureMetadata(req, loginUser);
+        return ResultUtils.success(result);
+    }
+
 
 }

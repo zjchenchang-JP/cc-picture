@@ -4073,3 +4073,507 @@ public User getUser(Long userId) { ...}
 4. **`#result` 在 `@Cacheable` 不可用**：因为它可能在方法执行前就返回缓存，没有 result。`@CachePut`/`unless` 才能用。
 5. **`${}` 是启动时替换、`#{}` 是运行时计算**：想在 `@Value` 里读配置再计算，用 `#{ ${...} }` 嵌套。
 6. **别滥用编程式 SpEL**：能写普通 Java 就别用 SpEL，它牺牲编译期检查、不好调试、且有注入风险（用户输入拼进表达式很危险）。
+
+---
+
+## 自定义线程池 + @EnableAsync
+
+### 配置类长什么样
+
+```java
+@Configuration
+@EnableAsync
+public class SpringAsyncConfig {
+    @Bean("yuPictureExecutor")
+    public Executor threadPoolTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(10);
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("yu-picture-executor-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        return executor;
+    }
+}
+```
+
+向容器注册一个名为 `yuPictureExecutor` 的自定义线程池，给 `@Async` 方法用（如 `clearPictureFile` 异步清理 COS）。
+
+### @EnableAsync：异步总开关
+
+`@Async` 注解**单独写不生效**，依赖 Spring 的 AOP 代理：
+
+- 调用 @Async 方法 → 代理拦截 → 把任务丢进线程池立即返回（不阻塞调用者）→ 真正工作由线程池线程异步执行
+- **没有 @EnableAsync**：不建代理 → 方法仍是同步执行，@Async 形同虚设
+- **有 @EnableAsync**：开启异步 → @Async 方法被代理 → 提交线程池异步跑
+
+一句话：`@EnableAsync` 是"异步功能"的总开关，`@Async` 是"哪个方法要异步"的标记。两者缺一不可。
+
+### 线程池参数逐个讲（ThreadPoolTaskExecutor = Spring 对 JDK ThreadPoolExecutor 的封装）
+
+| 参数 | 值 | 含义 |
+|---|---|---|
+| `corePoolSize` | 10 | 核心线程数，常驻不销毁 |
+| `maxPoolSize` | 10 | 最大线程数，队列满了才扩容到此（本项目=核心，不扩容） |
+| `queueCapacity` | 200 | 任务队列容量，核心线程都忙时新任务排队，最多 200 |
+| `threadNamePrefix` | `yu-picture-executor-` | 线程名前缀，方便日志排查 |
+| `waitForTasksToCompleteOnShutdown` | true | 优雅关闭，停机时等正在跑的任务跑完 |
+| `rejectedExecutionHandler` | `AbortPolicy` | 拒绝策略：线程全忙+队列满时抛 `RejectedExecutionException` |
+
+**拒绝策略对比（4 种）：**
+
+| 策略 | 行为 |
+|---|---|
+| `AbortPolicy`（本项目用） | 抛异常，让调用方知道"扛不住了" |
+| `CallerRunsPolicy` | 谁提交谁自己跑（背压限流） |
+| `DiscardPolicy` | 默默丢弃新任务 |
+| `DiscardOldestPolicy` | 丢掉队列里最老的，腾位置 |
+
+### 任务提交流程（参数怎么配合）
+
+```
+新任务进来
+   ↓
+① 核心线程(<10)有空闲? ──有──→ 直接执行
+   ↓ 没有
+② 队列(<200)没满? ──────没满──→ 进队列等
+   ↓ 满
+③ 还能扩容到 maxPoolSize? ──能──→ 新建线程执行
+   ↓ 不能(本项目 core=max=10, 走不到这步)
+④ 触发拒绝策略(AbortPolicy → 抛异常)
+```
+
+本项目 `corePoolSize == maxPoolSize == 10`，**不动态扩容**：固定 10 线程 + 200 队列，**最多承载 210 个任务**，第 211 个抛异常。适合"控制并发上限"（如异步清理 COS，不想开太多线程把 COS 打挂）；缺点是队列偏大，高并发时任务排队较久才会被拒绝。
+
+### @Async 怎么用这个线程池 + 生效条件
+
+```java
+@Async("yuPictureExecutor")   // 指定用名为 yuPictureExecutor 的线程池
+public void clearPictureFile(Picture oldPicture) { ... }
+```
+
+不写名字时 Spring 默认找名为 `taskExecutor` 的线程池；自定义线程池最好显式指定名字，避免用错。
+
+**@Async 生效的 3 个条件（坑）：**
+
+1. 方法必须是 `public`（代理只拦 public 方法）
+2. 类必须是 Spring Bean（`@Service`/`@Component`）
+3. **❌ 不能同类内部调用（self-invocation）**：同一个类里 A 方法直接调 B 方法（B 标了 @Async），@Async **不生效**——因为是 `this.B()`，绕过了代理。要么把 B 拆到另一个 Bean，要么注入自己（`@Resource private X self; self.B();`）再调。
+
+> 本项目启动类加了 `@EnableAspectJAutoProxy(exposeProxy = true)`，所以也可以用 `AopContext.currentProxy()` 拿代理后再调，绕开 self-invocation。
+
+### @EnableAsync 标一次就够（启动类 vs 配置类）
+
+`@EnableAsync` 是**全局开关**，整个应用**标一次即可**，放启动类 / 任意 `@Configuration` 类都一样。
+
+- **重复标注不会报错**：内部靠 `@Import(AsyncConfigurationSelector.class)` 导入配置，Spring 对 `@Import` 幂等去重，标 N 次 = 标 1 次，功能正常。
+- **但冗余，建议删一个**：本项目启动类已标 `@EnableAsync`，`SpringAsyncConfig` 上的就是冗余。推荐**删 `SpringAsyncConfig` 的**，让配置类只负责定义线程池 Bean，全局开关（`@EnableAsync`/`@EnableScheduling`/`@EnableXxx`）集中在启动类管理——一眼看清这个应用开了哪些能力。
+
+### 本项目场景
+
+`clearPictureFile`（删 COS 旧文件）标 `@Async`：换图/删图时主流程先返回，删旧文件在后台慢慢做，**不拖慢用户请求**。清理这种容错性强、不要求实时的操作，适合丢线程池异步跑。
+
+---
+
+## 批量编辑 batchEditPictureMetadata：并发编排与事务审查
+
+> 一次完整的"代码审查 → 发现问题 → 方案演进"过程。核心结论：**并发、事务一致性、大数据量三者天然冲突，要按场景取舍**。
+
+### 原始方法（问题版本）
+
+```java
+@Override
+@Transactional(rollbackFor = Exception.class)
+public void batchEditPictureMetadata(PictureEditByBatchRequest req, User loginUser) {
+    // 1 校验 + 查 pictureList(只 select id/spaceId)
+    List<Picture> pictureList = this.lambdaQuery()...list();
+
+    // 3 分批 + CompletableFuture 并发
+    ArrayList<CompletableFuture<Void>> futureList = new ArrayList<>();
+    for (int i = 0; i < pictureList.size(); i += BATCH_SIZE) {
+        List<Picture> batch = pictureList.subList(i, Math.min(i + BATCH_SIZE, pictureList.size()));
+        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+            batch.forEach(p -> { p.setCategory(...); p.setTags(...); });
+            this.fillPictureWithNameRule(pictureList, nameRule);   // ← 传错参数(传了整个 list)
+            this.updateBatchById(batch);                            // ← 在并发线程里写库
+        }, ccPictureExecutor);
+        futureList.add(future);
+    }
+    CompletableFuture.allOf(futureList.toArray(new CompletableFuture[0])).join();
+    this.updateBatchById(pictureList);   // ← 循环外又写一次
+}
+```
+
+### 一、CompletableFuture API 语法
+
+把 `CompletableFuture.allOf(futureList.toArray(new CompletableFuture[0])).join();` 逐个拆：
+
+| API | 作用 |
+|---|---|
+| `runAsync(Runnable, Executor)` | 提交任务到指定线程池异步执行，返回 `CompletableFuture<Void>`（无结果）。有返回值的版本叫 `supplyAsync(Supplier)` |
+| `toArray(new CompletableFuture[0])` | List → 数组。`allOf` 要的是**可变参数** `CompletableFuture<?>...`，必须转数组；传 0 长数组是 JDK8+ 推荐写法 |
+| `allOf(...)` | 静态方法，返回"**所有 future 都完成才完成**"的新 future（屏障/barrier）。拿不到子任务结果，只用于等齐；任一子任务异常它也异常完成。兄弟方法 `anyOf` 是任一完成即可 |
+| `.join()` | 阻塞当前线程等完成，异常抛 `CompletionException`（**非受检**）。对比 `.get()` 要处理受检异常（InterruptedException/ExecutionException） |
+
+整句含义：**并行跑所有 batch，主线程堵在这里等全部完成再往下走**。
+
+### 二、三个原始问题
+
+**Q1：循环外为什么还要 `updateBatchById(pictureList)`？**
+初看像冗余（循环内 batch 已写）。**后文第四节会修正这个判断**——结合事务看，它其实是"统一提交点"的正确位置，该删的是循环内的写库。
+
+**Q2：`allOf` 语法为什么这么写？**
+`allOf` 签名是可变参数 `CompletableFuture<?>...`，必须把 List 转成数组喂进去。这是"多任务并行 + 屏障等齐"的标准模板。
+
+**Q3：`fillPictureWithNameRule` 能写循环外吗？**
+**能，而且必须**。它在循环里是三重错误：
+1. **传错参数**——传了整个 `pictureList` 而非当前 `batch`
+2. **并发覆盖**——多个 batch 任务并发地各自给整个 list 重新编号（`count` 每次从 1 开始），互相覆盖，最终 name 乱序/重复
+3. **语义错误**——全局序号是**顺序操作**（依赖"第几张"），天生不能丢进并发任务
+正确：移到循环**前**，主线程同步编号一次。
+
+### 三、最严重：@Transactional + 异步线程 = 事务失效
+
+方法标了 `@Transactional`，但任务丢进了 `ccPictureExecutor` 线程池——**这是矛盾的**。
+
+- Spring 事务靠 `ThreadLocal` 绑定到**当前线程**。事务在主线程开，`updateBatchById` 在**别的线程**跑 → 拿不到主线程事务 → 各自独立提交（或无事务自动提交）。
+- 后果：`@Transactional` 想要的"全部成功才提交、失败全回滚"**完全失效**；异步线程的异常也不会传回主线程事务。
+- 注释说"分批避免长事务"，却又加了 `@Transactional`（想要一致性），**两个目标互相打架**，结果一致性没拿到、事务也形同虚设。
+
+### 四、异步异常能传上来吗 + 事务怎么救
+
+**异常能传，但有限制：**
+- `runAsync` 里抛的异常**不立即抛**，存进 future，`join()` 时才以 `CompletionException` 包装抛出（延迟、非实时）。
+- `allOf` 只暴露**第一个**异常，其他被吞；而且 `join` 抛异常时，其他任务可能已经执行并提交了。
+
+**事务救法评估：**
+
+| 方案 | 能否解决 | 原因 |
+|---|---|---|
+| 声明式事务传播（`propagation`） | ❌ | 传播行为只对**同线程**调用链生效，跨线程 ThreadLocal 隔离 |
+| 父子线程传递事务 | ❌ | Spring 官方不支持跨线程事务传播；Connection 非线程安全，强行传会崩 |
+| 编程式事务（`TransactionTemplate`） | ⚠️ 部分 | 每个子线程各自开事务 = 每批独立事务，**非全局一致**（batch1 提交后 batch2 失败，batch1 不回滚） |
+
+**⚠️ 关键修正（推翻 Q1 初判）：**
+循环外 `updateBatchById(pictureList)` **不是冗余**，是"统一提交点"的正确位置；真正该删的是循环内 `updateBatchById(batch)`——它把写库提前到异步线程，既破坏事务、又和循环外重复。
+
+**方案 d：并发只算 + 主线程统一写**
+
+```java
+@Transactional(rollbackFor = Exception.class)   // 主线程事务真正生效
+public void batchEditPictureMetadata(...) {
+    // 主线程同步编号(全局顺序, 不能并发)
+    this.fillPictureWithNameRule(pictureList, nameRule);
+    // 并发阶段: 只在内存 setCategory/setTags(纯内存、无状态、线程安全), 不碰 DB
+    for (...) CompletableFuture.runAsync(() -> batch.forEach(p -> {...}), ccPictureExecutor);
+    CompletableFuture.allOf(...).join();          // 等内存计算完
+    this.updateBatchById(pictureList);            // 主线程一次性写库(事务内, 全局一致)
+}
+```
+
+兼得**并发加速 + 全局事务一致性**——异步线程只做内存计算，DB 写集中到主线程一个事务。
+
+### 五、方案 d 的软肋：数据量大时不行
+
+**内存**：方法开头全量 `select` 把 pictureList 全加载，几万条 OK，海量吃紧 → 要改**分页查询**。
+
+**长事务**：`updateBatchById(整个 list)` 在 `@Transactional` 里，数据量大 → 一个事务持有久 → 锁多、undo 膨胀、锁等待超时（正是注释想避免的）。
+- 注：MyBatis-Plus 用 `executorType=BATCH`（预编译一次 + 多次 `addBatch` + `executeBatch`），**SQL 不会超大**（不触发 `max_allowed_packet`），但**事务时长**仍是问题。
+
+**数据量大的正确姿势：分页查询 + 分批小事务 + 记录结果**
+
+```java
+// 主方法不加全局 @Transactional(允许部分成功)
+public BatchEditResult batchEditPictureMetadata(...) {
+    long seq = 1; int success = 0; List<Long> failedIds = new ArrayList<>();
+    for (int from = 0; from < pictureIdList.size(); from += pageSize) {
+        List<Long> pageIds = pictureIdList.subList(from, Math.min(from + pageSize, pictureIdList.size()));
+        List<Picture> batch = this.lambdaQuery()...in(Picture::getId, pageIds).list(); // 分页查, 内存只持一页
+        for (Picture p : batch) { p.setName(nameRule.replaceAll("\\{序号}", String.valueOf(seq++))); /* setCategory/setTags */ }
+        try {
+            ((PictureService) AopContext.currentProxy()).updateBatchInTx(batch);  // 每批小事务
+            success += batch.size();
+        } catch (Exception e) { failedIds.addAll(batch.stream().map(Picture::getId).collect(Collectors.toList())); log.error("批次 from={} 失败", from, e); }
+    }
+    return new BatchEditResult(success, failedIds);
+}
+
+@Transactional(rollbackFor = Exception.class)
+void updateBatchInTx(List<Picture> batch);   // 接口声明, 每批独立小事务, 秒级提交, 不长
+```
+
+> `AopContext.currentProxy()` 能用，是因为启动类开了 `@EnableAspectJAutoProxy(exposeProxy = true)`，正好绕开 self-invocation 导致 `@Transactional` 失效的坑。不想用 proxy 就把小事务方法拆到另一个 Service。
+
+**取舍表：**
+
+| 数据量 | 推荐方案 | 一致性 | 内存 | 长事务 |
+|---|---|---|---|---|
+| 小（几百~几千） | 方案 d：内存算 + 主线程一次写（带 @Transactional） | ✅ 全局 ACID | 一次性加载（量小 OK） | 短 |
+| 大（几万~海量） | **分页查 + 分批小事务 + 记录结果** | 最终一致 | 只持一页 | 每批短 |
+| 大且要全局一致 | 分页查 + 单线程一个长事务顺序写 | ✅ ACID | 一页页查 | ❌ 长，慎用 |
+
+> 批量改分类/标签这种"set 几个字段"的场景，**纯内存操作不值得并发**（开销小于线程切换），单线程分页顺序处理反而最简单最快。
+
+### 六、失败批重试 + 记录什么
+
+**"失败的批"的本质**：每批一个事务，失败 = 整批回滚（100 条都没成功，干净的失败单元）。重试针对**这批的 pictureId**，不是"批次号"（批次号只是分页边界，业务无意义）。
+
+**三种重试方式（轻 → 重）：**
+- **A 同步自动重试**（方法内重试 2~3 次带退避）：兜瞬时错误（锁等待/超时/DB 抖动），最常用。
+- **B 返回失败 pictureId，前端手动重试**：复用原接口（body 传 `failedPictureIds`），零额外开发。
+- **C 任务表持久化 + 定时/MQ 异步重试**：仅当"无人值守、最终一致、可追溯"（如凌晨定时批量）才上；手动触发的场景没必要。
+
+**记录什么：**
+
+| 记录对象 | 要不要 | 用途 |
+|---|---|---|
+| 批次号 | ❌ | 业务无意义 |
+| 失败 pictureId 列表 | ✅ 返回值 | 重试的依据 |
+| 失败原因 | ✅ log（+可选返回） | 排查 + 区分瞬时/确定性错误 |
+| 持久化任务表 | ⚠️ 看需求 | 仅离线/异步重试时 |
+
+**推荐 A+B 组合**：分页循环 → 每批同步重试 3 次 → 仍失败收集 pictureId → 返回 `BatchEditResult(success, failedPictureIds)` → 前端一键重试。
+
+### 七、经验教训
+
+1. **@Transactional 和异步线程是死敌**：事务绑 ThreadLocal，跨线程必失效。要么去掉事务接受部分成功，要么把 DB 写挪回主线程。
+2. **并发只该用在"重活"上**：set 几个字段这种纯内存操作，并发收益小于线程切换开销，顺序处理更稳更快。
+3. **"并发 + 事务一致性"两全的套路**：异步线程只做内存计算，DB 写集中到主线程一个事务（方案 d）。
+4. **数据量决定方案**：小数据用方案 d（一致+简单）；大数据用分页+分批小事务（避免长事务+内存爆），代价是放弃全局 ACID。
+5. **重试记 pictureId 不记批次号**：失败单元是具体图片，批次号只是分页边界；瞬时错误靠同步重试兜，兜不住的返回失败列表让前端重试。
+6. **代码审查先看"事务边界"**：看到 `@Transactional` + 线程池，先怀疑事务失效；看到循环内外重复写库，先想"哪个才是真正的提交点"。
+
+---
+
+## 补充：对照鱼皮原版 + 事务/锁竞争深入
+
+> 承接上一篇。拿出鱼皮的原版代码对照后，对"循环外是否冗余""分批异步能否保事务""并发写库的锁竞争"做更准确的澄清，并纠正一个常见误解（**ID 自增 ≠ 不抢锁**）。
+
+### 鱼皮原版长这样（和问题版的区别）
+
+```java
+@Transactional(rollbackFor = Exception.class)
+public void batchEditPictureMetadata(PictureBatchEditRequest request, Long spaceId, Long loginUserId) {
+    validateBatchEditRequest(request, spaceId, loginUserId);
+    List<Picture> pictureList = this.lambdaQuery().eq(...).in(...).list();
+    if (pictureList.isEmpty()) throw new BusinessException(...);
+
+    int batchSize = 100;
+    List<CompletableFuture<Void>> futures = new ArrayList<>();
+    for (int i = 0; i < pictureList.size(); i += batchSize) {
+        List<Picture> batch = pictureList.subList(i, Math.min(i + batchSize, pictureList.size()));
+        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+            batch.forEach(p -> { p.setCategory(...); p.setTags(...); });
+            if (!this.updateBatchById(batch)) throw new BusinessException(...);
+        }, customExecutor);
+        futures.add(future);
+    }
+    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+    // 注意: 鱼皮原版【没有】循环外的 updateBatchById(pictureList)
+}
+```
+
+### 一、循环外 updateBatchById 是不是冗余？——二选一，看循环内写不写
+
+**写库点只能留一个**：
+
+| 方案 | 循环内 | 循环外 | 循环外那次 |
+|---|---|---|---|
+| 鱼皮结构（循环内分批写） | `updateBatchById(batch)` ✅ | 没有 | — |
+| 方案 d（循环内只算，主线程统一写） | 不写库，只 set 字段 | `updateBatchById(pictureList)` ✅ | 唯一写库点 |
+| 问题版原代码（两个都写） | `updateBatchById(batch)` | `updateBatchById(pictureList)` | ❌ 冗余（重复写） |
+
+- **走鱼皮结构 → 循环外那次就是冗余，删掉**。
+- 上一篇第四节说"循环外不是冗余"是**在"改成方案 d"的前提下**——前提不成立就别套用。
+- 问题版原代码 = 鱼皮结构 + 一个冗余的循环外写 + `fillPictureWithNameRule` 的 bug。
+
+### 二、分批异步能保证整体事务吗？能避免长事务吗？
+
+**都不能——而且鱼皮的 `@Transactional` 其实"写了个寂寞"：**
+
+**不能保证整体事务**：`@Transactional` 靠 `ThreadLocal` 绑定当前线程，`updateBatchById` 在 `customExecutor` 的别的线程跑 → 拿不到主线程事务 → 每批各自独立提交。所以这段代码的 `@Transactional` **没起到任何事务保护**：某批失败抛异常，其他已提交的批不会回滚。
+
+> 这是 `@Transactional` + 线程池的通病，不是鱼皮独有。只要 DB 操作跨线程，事务必失效。
+
+**"避免长事务"是歪打正着**：注释说"分批避免长事务"——目标达成了，但不是靠"分批+事务"，而是**因为事务压根没生效**：每批在异步线程里自动提交（无显式事务），所以没有长事务。如果 `@Transactional` 真生效（单线程一个事务），那才是长事务。
+
+**根本矛盾（二者不可兼得）：**
+
+| 想要 | 做法 | 代价 |
+|---|---|---|
+| 整体事务一致性 | 单线程 + 一个 `@Transactional`（或方案 d 主线程统一写） | 数据量大 → 长事务 |
+| 避免长事务 | 分批 + 每批独立提交（去掉/失效 `@Transactional`） | 丧失全局一致性，部分成功 |
+
+**结论：分批异步 ⟹ 必然没有整体事务一致性。** 想两全只能在"并发只算、写库回主线程"（方案 d）折中，但数据量大时方案 d 又变长事务。
+
+### 三、分批 updateBatchById 的数据库竞争 + "ID 自增"误解
+
+**纠正一个概念误解：ID 是否自增，和 UPDATE 的锁竞争没有任何关系。**
+
+- UPDATE 的锁取决于"**是否更新同一行**"，不是"ID 怎么生成"。
+- 自增（auto_increment）只是**插入时分配 ID** 的机制，UPDATE 阶段根本不涉及。
+
+**本场景：各批不重叠 → 无锁竞争 ✅**
+
+```
+batch1: 更新 id [1..100]    → 锁住第 1~100 行
+batch2: 更新 id [101..200]  → 锁住第 101~200 行   ← 不同行, 行锁互不干扰
+batch3: 更新 id [201..300]  → 锁住第 201~300 行
+```
+
+- `UPDATE ... WHERE id = ?` 按主键等值 → 只加**行锁**（命中行），**不加间隙锁**（间隙锁出现在范围查询/非唯一索引）。
+- `subList` 保证各批 id 完全不重叠 → 更新不同行 → 行锁各管各的 → **没有锁等待、没有死锁**。
+
+**但有"非锁"的资源开销（容易被忽略）：**
+
+| 开销 | 说明 |
+|---|---|
+| **DB 连接池** | 每个异步线程执行 `updateBatchById` 需要独立 DB 连接。线程池 N 线程并发 → 同时要 N 个连接。**HikariCP `maxPoolSize` 要 ≥ 线程数**，否则线程卡在"等连接"，并发退化成排队 |
+| IO / redo log / binlog | 多线程并发刷盘，磁盘 IO 压力增大 |
+| CPU 上下文切换 | 线程多切换开销大；set 几个字段这种轻活，并发收益可能盖不住切换成本 |
+
+### 四、综合结论（走鱼皮结构）
+
+1. **删掉循环外的 `updateBatchById(pictureList)`**——鱼皮结构下它就是冗余。
+2. **修 `fillPictureWithNameRule`**——移到循环前、主线程同步编号一次（别在并发任务里调、参数传对）。
+3. **认清 `@Transactional` 失效**——这段没有整体事务保护，是"每批各自提交、部分成功"。业务能接受就去掉 `@Transactional`（名存实亡不如不留，还误导）；不能接受就改方案 d 或单线程。
+4. **锁竞争不用担心**（各批 id 不重叠），但**确认连接池够大**（≥ 线程池核心数），否则并发被连接池卡住。
+5. set 字段这种轻活，**并发收益有限**，单线程顺序分批往往更简单稳——并发主要在每批有重计算/IO 时才值。
+
+---
+
+## CompletableFuture：supplyAsync 提交带返回值的任务 + join 取结果
+
+> 承接 batchEditPictureMetadata 的并发编排。重点讲两个 API：`supplyAsync`（提交带返回值的异步任务）和 `future.join()`（取每个任务的结果）。
+
+### 一、supplyAsync：提交"有返回值"的异步任务
+
+```java
+public static <U> CompletableFuture<U> supplyAsync(Supplier<U> supplier, Executor executor)
+```
+
+- 参数 `Supplier<U>`：无参、返回 U 的 lambda（`() -> 某个值`）。
+- 丢进 executor 线程池异步跑，返回 `CompletableFuture<U>`——将来"装着"任务的返回值。
+
+对比 runAsync：
+
+| API | 任务有返回值 | 返回的 future |
+|---|---|---|
+| `runAsync(Runnable, Executor)` | ❌（Runnable 是 `() -> void`） | `CompletableFuture<Void>` |
+| `supplyAsync(Supplier, Executor)` | ✅（Supplier 是 `() -> U`） | `CompletableFuture<U>` |
+
+代码：
+
+```java
+CompletableFuture<BatchResult> future = CompletableFuture.supplyAsync(() -> {
+    try {
+        ...
+        return BatchResult.ok(batch.size());   // 任务 return 一个 BatchResult
+    } catch (Exception e) {
+        return BatchResult.fail(...);
+    }
+}, ccPictureExecutor);
+```
+
+**为什么不用 runAsync + 外部 list 收集？** supplyAsync 的返回值通过 future 本身传递，**线程安全**；runAsync 没返回值，要拿结果得用外部共享变量（多线程写同一个 list 要加锁，麻烦易错）。supplyAsync 是"带结果回传"的标准姿势。
+
+### 二、future.join()：取出该任务的返回值
+
+```java
+public U join()   // 阻塞当前线程, 等 future 完成, 返回里面的值
+```
+
+代码：
+
+```java
+for (CompletableFuture<BatchResult> future : futureList) {
+    BatchResult r = future.join();     // 取这个任务的 BatchResult
+    successCount += r.successCount;
+    failedPictureIds.addAll(r.failedIds);
+    ...
+}
+```
+
+对每个 future 调 `join()`，把任务当年 `return` 的 `BatchResult` 取出来累加——**就是"取到每一个任务的结果"**。
+
+### 三、为什么 allOf(...).join() 之后还要再 join 一次？
+
+最容易绕晕的点——**allOf 只负责"等齐"，不负责"给结果"**：
+
+```java
+CompletableFuture.allOf(futureList.toArray(...)).join();   // ① 屏障: 等所有任务完成
+for (CompletableFuture<BatchResult> future : futureList) {
+    BatchResult r = future.join();                          // ② 取数: 拿每个任务的结果
+}
+```
+
+- **① `allOf(...).join()`**：`allOf` 返回的是 `CompletableFuture<Void>`，只表示"所有子任务完成了"，**本身不含任何子任务的结果**。它的 `join` 只是"阻塞到全部完成"。
+- **② 逐个 `future.join()`**：`allOf` 保证此时所有任务都完成了，所以这里的 `join` **立即返回**（不会真阻塞），只是把每个 future 里存的 `BatchResult` "取出来"。
+
+> 一句话：**`allOf` 管"等齐"，逐个 `join` 管"取结果"，是两件事，缺一不可。**
+
+### 四、join() vs get()
+
+| | 异常类型 | 用起来 |
+|---|---|---|
+| `join()` | `CompletionException`（非受检） | 不用 try-catch，简洁 |
+| `get()` | `InterruptedException` + `ExecutionException`（受检） | 必须 try-catch 或 throws |
+
+循环取结果用 `join` 干净。
+
+### 五、等价的流式写法
+
+```java
+List<BatchResult> results = futureList.stream()
+        .map(CompletableFuture::join)
+        .collect(Collectors.toList());
+```
+
+### 一句话总结
+
+- **`supplyAsync`** = "异步跑这个任务，它有返回值，用 future 装好给我"。
+- **`future.join()`** = "把这个任务的结果取出来（没完成就等，完成了直接给）"。
+- **`allOf` + 逐个 `join`** = "先等所有任务完成，再把每个结果挨个取出来汇总"。
+
+---
+
+## BatchResult 该不该从 PictureServiceImpl 抽出来、单独建 async 包？
+
+> 承接上面。`batchEditPictureMetadata` 里用了个私有静态内部类 `BatchResult`（每批的处理结果），纠结要不要抽到独立的 `common/async` 包。
+
+### 先分清两个"结果类"
+
+| 类 | 位置 | 性质 | 字段 |
+|---|---|---|---|
+| `BatchResult` | `PictureServiceImpl` 私有内部类 | **内部实现细节**（外部看不到） | successCount / failedIds / error |
+| `BatchEditResult` | `model/vo` | **对外契约**（返给前端） | successCount / failedCount / failedPictureIds / errors |
+
+别把这两个搞混——纠结抽不抽的是 `BatchResult`（内部那个），`BatchEditResult` 本来就在外面。
+
+### 三种取舍
+
+| 方案 | 做法 | 适用场景 |
+|---|---|---|
+| **A. 保持内部类**（现状） | 不动 | 只有一处用 |
+| **B. 抽到独立类** | 移到 `common/async/BatchResult.java`，`private`→`public` | 预期多个地方复用 |
+| **C. 抽通用工具** | 写 `BatchAsyncRunner<T>`，封装"分批 + 并行 + try-catch + 收集" | 多个批量异步场景、模式一致，想消除重复 |
+
+### 建议：现在保持内部类（方案 A）
+
+理由：
+1. **YAGNI**（You Aren't Gonna Need It）：只有 `batchEditPictureMetadata` 一处用，没复用对象，抽出去是"为复用而复用"。
+2. **封装性更好**：私有内部类让"每批结果"这个实现细节对外完全不可见；抽成 `public` 反而把内部结构暴露到全局。
+3. **一个小内部类不算臃肿**，比多一个文件好维护。
+
+### 什么时候才抽（Rule of Three）
+
+等**真出现第 2、3 个**"分批异步 + 收集结果"的场景（比如批量删除图片、批量审核也走这套），重复了两三次，再抽：
+- **方案 B**：`common/async/BatchResult<T>`，且**泛型化**（`T` 是失败项类型，这里是 `Long` 即 pictureId）——不然换场景字段又不一样。
+- **方案 C**：进一步把"分批并行编排"抽成 `BatchAsyncRunner`，业务方只传"一批怎么处理"的函数，消除样板代码。
+
+> **规则三（Rule of Three）**：一件事重复三次再抽象。第一次直接写，第二次忍着，第三次才抽。提前抽象往往是过度设计。
+
+### 一句话
+
+**别为了"看起来规范"就抽。** 内部类在现阶段是对的；等重复出现了，再抽 `common/async/`（带泛型），那时抽才划算。

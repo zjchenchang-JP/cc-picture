@@ -6,6 +6,7 @@ import com.zjcc.ccpicturebackend.model.dto.picture.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.zjcc.ccpicturebackend.model.entity.User;
+import com.zjcc.ccpicturebackend.model.vo.BatchEditResult;
 import com.zjcc.ccpicturebackend.model.vo.PictureVO;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -131,11 +132,17 @@ public interface PictureService extends IService<Picture> {
 
     /**
      * 批量更新
-     *
+     * 处理的数据量不大, 用本方法
      * @param pictureEditByBatchRequest pictureEditByBatchRequest
      * @param loginUser                 登录的用户
      */
     void editPictureByBatch(PictureEditByBatchRequest pictureEditByBatchRequest, User loginUser);
 
-
+    /**
+     * (大量数据) 批量编辑图片分类、标签、重命名
+     * 性能优化: 线程池 + 分批 + 并发进行优化
+     * @param pictureEditByBatchRequest pictureEditByBatchRequest
+     * @param loginUser 登录的用户
+     */
+    BatchEditResult batchEditPictureMetadata(PictureEditByBatchRequest pictureEditByBatchRequest, User loginUser);
 }
