@@ -714,7 +714,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         String nameRule = pictureEditByBatchRequest.getNameRule();
         this.fillPictureWithNameRule(pictureList, nameRule);
 
-        // 3 分批异步处理: 每批 try-catch, 失败不中断、记录失败的 pictureId
+        // 3 性能优化：多线程 + 分批异步处理: 每批 try-catch, 失败不中断、记录失败的 pictureId
         //    放弃外层统一事务, 走"尽力而为 + 最终一致", 失败的留给前端按 failedPictureIds 重试
         List<CompletableFuture<BatchResult>> futureList = new ArrayList<>();
         for (int i = 0; i < pictureList.size(); i += BATCH_SIZE) {
