@@ -31,4 +31,21 @@
         picSize,picWidth,picHeight,picScale,picFormat,
         userId,createTime,editTime,updateTime,isDelete
     </sql>
+
+    <select id="getCategoryStatistics" resultType="map">
+        SELECT category AS category,
+        COUNT(*) AS count,
+        SUM(picSize) AS totalSize
+        FROM picture
+        WHERE isDelete = 0
+        <if test="params.queryAll != null and params.queryAll">
+        </if>
+        <if test="params.queryPublic != null and params.queryPublic">
+            AND spaceId IS NULL
+        </if>
+        <if test="params.spaceId != null">
+            AND spaceId = #{params.spaceId}
+        </if>
+        GROUP BY category;
+    </select>
 </mapper>
