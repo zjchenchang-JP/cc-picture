@@ -5,9 +5,11 @@ import com.zjcc.ccpicturebackend.common.ResultUtils;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceCategoryAnalyzeRequest;
+import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceTagAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceUsageAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceCategoryAnalyzeResponse;
+import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceTagAnalyzeResponse;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceUsageAnalyzeResponse;
 import com.zjcc.ccpicturebackend.service.SpaceAnalyzeService;
 import com.zjcc.ccpicturebackend.service.UserService;
@@ -53,5 +55,17 @@ public class SpaceAnalyzeController {
         List<SpaceCategoryAnalyzeResponse> resultList = spaceAnalyzeService.getSpaceCategoryAnalyze(spaceCategoryAnalyzeRequest, loginUser);
         return ResultUtils.success(resultList);
     }
+
+    /**
+     * 获取空间图片标签 分析
+     */
+    @PostMapping("/tag")
+    public BaseResponse<List<SpaceTagAnalyzeResponse>> getSpaceTagAnalyze(@RequestBody SpaceTagAnalyzeRequest spaceTagAnalyzeRequest, HttpServletRequest request) {
+        ThrowUtils.throwIf(spaceTagAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+        User loginUser = userService.getLoginUser(request);
+        List<SpaceTagAnalyzeResponse> resultList = spaceAnalyzeService.getSpaceTagAnalyze(spaceTagAnalyzeRequest, loginUser);
+        return ResultUtils.success(resultList);
+    }
+
 
 }

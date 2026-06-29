@@ -1,17 +1,21 @@
 package com.zjcc.ccpicturebackend.service.impl;
 
 import cn.hutool.core.util.NumberUtil;
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceCategoryAnalyzeRequest;
+import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceTagAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceUsageAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceCategoryAnalyzeResponse;
+import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceTagAnalyzeResponse;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceUsageAnalyzeResponse;
 import com.zjcc.ccpicturebackend.service.PictureService;
 import com.zjcc.ccpicturebackend.service.SpaceAnalyzeService;
@@ -136,6 +140,35 @@ public class SpaceAnalyzeServiceImpl implements SpaceAnalyzeService {
                 }).collect(Collectors.toList());
     }
 
+    @Override
+    public List<SpaceTagAnalyzeResponse> getSpaceTagAnalyze(SpaceTagAnalyzeRequest spaceTagAnalyzeRequest, User loginUser) {
+        ThrowUtils.throwIf(spaceTagAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+        // 权限检测
+        checkSpaceAnalyzeAuth(spaceTagAnalyzeRequest,loginUser);
+        // 构造查询条件
+        QueryWrapper<Picture> queryWrapper = new QueryWrapper<>();
+        fillAnalyzeQueryWrapper(spaceTagAnalyzeRequest,queryWrapper);
+        // 查询所有符合条件的标签
+        queryWrapper.select("tags");
+        List<Object> selectObjs = pictureService.getBaseMapper().selectObjs(queryWrapper);
+        List<String> tagsJsonList = selectObjs.stream()
+                .filter(Objects::nonNull)
+                .map(Object::toString)
+                .collect(Collectors.toList());
+        // 合并所有标签并统计使用次数
+        Map<String, Long> tagCountMap = tagsJsonList.stream()
+                .filter(str -> !str.isBlank())// 过滤空的 tags字段
+                .flatMap(tagsJson -> JSONUtil.toList(tagsJson, String.class).stream())
+                .filter(StrUtil::isNotBlank)    // 过滤tags中的空标签 ""
+                .collect(Collectors.groupingBy(tag -> tag, Collectors.counting()));
+
+        // 按使用次数降序排序, 转换为响应对象
+        return tagCountMap.entrySet().stream()
+                .sorted((e1, e2) -> Long.compare(e2.getValue(), e1.getValue()))
+                .map(e -> new SpaceTagAnalyzeResponse(e.getKey(), e.getValue()))
+                .collect(Collectors.toList());
+    }
+
     /**
      * 根据分析范围填充限定查询条件
      *
@@ -145,7 +178,10 @@ public class SpaceAnalyzeServiceImpl implements SpaceAnalyzeService {
     private static void fillAnalyzeQueryWrapper(SpaceAnalyzeRequest spaceAnalyzeRequest,
                                                 QueryWrapper<Picture> queryWrapper) {
         if (spaceAnalyzeRequest.isQueryAll()) return;
-        if (spaceAnalyzeRequest.isQueryPublic()) return;
+        if (spaceAnalyzeRequest.isQueryPublic()) {
+            queryWrapper.isNull("spaceId");
+            return;
+        }
         Long spaceId = spaceAnalyzeRequest.getSpaceId();
         if (spaceId != null) {
             queryWrapper.eq("spaceId", spaceId);
