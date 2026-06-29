@@ -4576,4 +4576,154 @@ List<BatchResult> results = futureList.stream()
 
 ### 一句话
 
-**别为了"看起来规范"就抽。** 内部类在现阶段是对的；等重复出现了，再抽 `common/async/`（带泛型），那时抽才划算。
+**别为了“看起来规范”就抽。** 内部类在现阶段是对的；等重复出现了，再抽 `common/async/`（带泛型），那时抽才划算。
+
+---
+
+# 2026/06/29
+
+## 空间标签分析 getSpaceTagAnalyze：tags 为什么不能像 category 那样直接 GROUP BY
+
+### 背景
+
+`category` 是单值字段（一张图一个分类），统计直接 `GROUP BY category` 就行。
+但 `tags` 是 **数组**，数据库里以 JSON 字符串存储（`JSONUtil.toJsonStr(tags)` 写入，如 `["风景","自然"]`）。
+
+直接 `GROUP BY tags` 会把 `["风景","自然"]` 当成一个完整字符串分组 → 统计的是“标签组合”次数，不是“风景”这个词出现的次数。所以 **必须先把每张图的标签数组“展开”成单个标签，再统计**。
+
+| 字段 | 结构     | 一张图   | 能直接 GROUP BY |
+|----|--------|-------|---------------|
+| category | 单值     | 一个分类 | ✅            |
+| tags   | 数组(JSON) | 多个标签 | ❌ 要先展开      |
+
+展开两种方式：Java 层 `JSONUtil.toList` 展开（简单，数据量小够用），或 MySQL 8.0+ `JSON_TABLE` 在 SQL 层展开。本项目数据量可控，Java 层展开最简单。
+
+### 两版实现对比（for 循环 vs Stream）
+
+**方案1：for 循环 + map.merge（命令式）**
+
+```java
+List<Picture> pictures = pictureService.list(queryWrapper);
+Map<String, Long> tagCountMap = new HashMap<>();
+for (Picture picture : pictures) {
+    if (StrUtil.isBlank(picture.getTags())) continue;
+    for (String tag : JSONUtil.toList(picture.getTags(), String.class)) {
+        tagCountMap.merge(tag, 1L, Long::sum);
+    }
+}
+```
+
+**方案2：Stream + flatMap + groupingBy（最终采用）**
+
+```java
+List<Object> selectObjs = pictureService.getBaseMapper().selectObjs(queryWrapper);
+Map<String, Long> tagCountMap = selectObjs.stream()
+        .filter(Objects::nonNull).map(Object::toString)
+        .filter(str -> !str.isBlank())
+        .flatMap(tagsJson -> JSONUtil.toList(tagsJson, String.class).stream())
+        .collect(Collectors.groupingBy(tag -> tag, Collectors.counting()));
+```
+
+**方案2 更好：**
+
+- `selectObjs("tags")` 只取单列、返回 `List<Object>`，**不构造 Picture 实体**，比 `list()` 更省内存。
+- `flatMap` 展开 + `groupingBy(counting())` 一条流水线声明完成，比 for 循环手动 merge 更简洁地道。
+
+### 最终实现
+
+```java
+@Override
+public List<SpaceTagAnalyzeResponse> getSpaceTagAnalyze(SpaceTagAnalyzeRequest spaceTagAnalyzeRequest, User loginUser) {
+    ThrowUtils.throwIf(spaceTagAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+    checkSpaceAnalyzeAuth(spaceTagAnalyzeRequest, loginUser);
+    QueryWrapper<Picture> queryWrapper = new QueryWrapper<>();
+    fillAnalyzeQueryWrapper(spaceTagAnalyzeRequest, queryWrapper);
+    queryWrapper.select("tags");
+    List<Object> selectObjs = pictureService.getBaseMapper().selectObjs(queryWrapper);
+    List<String> tagsJsonList = selectObjs.stream()
+            .filter(Objects::nonNull)
+            .map(Object::toString)
+            .collect(Collectors.toList());
+    // 合并所有标签并统计使用次数
+    Map<String, Long> tagCountMap = tagsJsonList.stream().filter(str -> !str.isBlank())
+            .flatMap(tagsJson -> JSONUtil.toList(tagsJson, String.class).stream())
+            .collect(Collectors.groupingBy(tag -> tag, Collectors.counting()));
+    // 按使用次数降序排序, 转换为响应对象
+    return tagCountMap.entrySet().stream()
+            .sorted((e1, e2) -> Long.compare(e2.getValue(), e1.getValue()))
+            .map(e -> new SpaceTagAnalyzeResponse(e.getKey(), e.getValue()))
+            .collect(Collectors.toList());
+}
+```
+
+---
+
+## flatMap vs map 的区别
+
+一句话：**map 是 1:1 转换，flatMap 是 1:N 转换 + 拍平。**
+
+|          | map          | flatMap                |
+|----------|--------------|------------------------|
+| 转换关系    | 1 进 1 出       | 1 进 N 出，再拍平           |
+| lambda 返回 | 任意值 R         | `Stream<R>`（一个流）       |
+| 流元素个数   | 不变           | 变多（展开）                 |
+| 作用       | 变换           | 变换 + 把内部集合摊平          |
+
+### 为什么标签展开必须用 flatMap
+
+假设 3 张图 tags：`图1 ["风景","自然"]`、`图2 ["人像"]`、`图3 ["风景","动物"]`。
+
+用 `map`（❌）：
+
+```
+map(tagsJson -> JSONUtil.toList(tagsJson, String.class))
+→ [ ["风景","自然"], ["人像"], ["风景","动物"] ]   ← 3 个 List，没展开！
+```
+
+后续 groupingBy 没法按单个标签计数（分组 key 是 List，不是 String）。
+
+用 `flatMap`（✅）：
+
+```
+flatMap(tagsJson -> JSONUtil.toList(tagsJson, String.class).stream())
+→ 风景, 自然, 人像, 风景, 动物   ← 拍平成单值流，可计数
+→ {风景=2, 自然=1, 人像=1, 动物=1}
+```
+
+关键：flatMap 的 lambda 返回的是 `.stream()`，flatMap 会把所有小流 **合并成一个大流**。
+
+> 类比：map 是“每件物品重新包装一次”（还是一件）；flatMap 是“每件物品拆开，把里面的东西全倒进一个大堆”（摊平）。
+
+---
+
+## flatMap 前后两个 filter 的粒度区别（易错点）
+
+代码里有两个 filter，看着像重复，实际过滤的 **数据粒度不同**：
+
+```java
+tagsJsonList.stream()
+    .filter(str -> !str.isBlank())                                          // ① flatMap 前
+    .flatMap(tagsJson -> JSONUtil.toList(tagsJson, String.class).stream())
+    //.filter(StrUtil::isNotBlank)                                           // ② flatMap 后（可选防御）
+    .collect(Collectors.groupingBy(tag -> tag, Collectors.counting()));
+```
+
+| filter 位置    | 流元素是         | 过滤什么                          | 是否必要 |
+|------------|--------------|-------------------------------|------|
+| ① flatMap **前** | 整张图的 tags JSON 字符串 | 整个 JSON 字符串为空（防 `toList("")` 报错） | **必要** |
+| ② flatMap **后** | 展开后的单个标签     | 单个标签本身为空（防数组里混 `[""]` 空串标签） | 可选   |
+
+用数据走一遍（图A tags=`["风景",""]`，图B tags=`""`）：
+
+```
+① flatMap 前 filter(str.isBlank):
+   图A "[\"风景\",\"\"]" → 非空，保留
+   图B ""              → 空，删掉 ✓（防 toList("") 报错）
+② flatMap 展开:
+   图A → 风景, ""   ← 图A 的空标签漏出来了
+③ 直接统计: {风景=1, ""=1}  ← 多了个空标签脏数据
+```
+
+图A 里的空标签 `""`，在 ① 阶段还藏在 JSON 数组里，① 的 filter 碰不到它；只有 flatMap 展开后才能被 ② 过滤。
+
+> 结论：① 必须保留（防报错）；② 看前端是否保证标签非空——没保证就加上 `.filter(StrUtil::isNotBlank)`，保证就不必。
