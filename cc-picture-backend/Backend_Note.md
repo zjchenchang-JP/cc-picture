@@ -4727,3 +4727,171 @@ tagsJsonList.stream()
 图A 里的空标签 `""`，在 ① 阶段还藏在 JSON 数组里，① 的 filter 碰不到它；只有 flatMap 展开后才能被 ② 过滤。
 
 > 结论：① 必须保留（防报错）；② 看前端是否保证标签非空——没保证就加上 `.filter(StrUtil::isNotBlank)`，保证就不必。
+
+---
+
+# 2026/07/01
+## （续）空间图片大小分析 getSpaceSizeAnalyze：sizeRanges 为什么用有序 Map
+
+### 背景
+
+图片大小分析，要把图片按大小分到 4 个区间统计数量，返回前端（通常画柱状图）：
+`<100KB`、`100KB-500KB`、`500KB-1MB`、`>1MB`。
+`sizeRanges` 用 `Map<String, Long>` 存「区间标签 → 数量」。
+
+### 为什么用有序 Map（LinkedHashMap）
+
+**目的：让返回顺序稳定、符合展示逻辑。** 大小分段画柱状图，x 轴应是固定的「从小到大」递增顺序，不能乱。
+
+| Map 类型 | 遍历顺序       | 适不适合                  |
+|--------|-------------|------------------------|
+| HashMap  | 不确定（hash 桶）   | ❌ 返回乱序                  |
+| LinkedHashMap | **插入顺序** | ✅ 可控                   |
+| TreeMap  | key 自然顺序      | ❌ key 是 `<100KB` 字符串，`<` 的 ASCII 排序会乱，不适用 |
+
+选 LinkedHashMap 没错——但**怎么用它**决定它是否真的有序。
+
+### 原始写法（forEach + getOrDefault）的两个隐患
+
+```java
+Map<String, Long> sizeRanges = new LinkedHashMap<>();
+picSizes.forEach(picSize -> {
+    if (picSize < 100 * 1024) {
+        sizeRanges.put("<100KB", sizeRanges.getOrDefault("<100KB", 0L) + 1);
+    } else if (...) { ... }
+});
+```
+
+**隐患 1：顺序依赖数据。**
+LinkedHashMap 保的是「首次插入顺序」，而这里「首次插入」取决于**哪张图先命中该区间**。若第一张图是 `>1MB`，`>1MB` 会被第一个 put → 返回结果 `>1MB` 排最前，顺序不稳定。
+
+**隐患 2：空区间会丢失 ⚠️（最关键，容易误判）。**
+
+「空区间」= 没有任何图片命中的区间。`getOrDefault` 写在 `put(key, ...)` 的**参数里**，只有**走到那个 if 分支才会执行**。如果一个区间一张图都没有，对应分支**一次都不执行** → `getOrDefault` 没机会被调用 → 那个 key **永远不会被 put 进 Map**。
+
+走一遍数据证明（一个只有小图的空间，2 张图都 <100KB）：
+
+```
+picSizes = [50KB, 60KB]
+遍历 50KB → 进分支1 → put("<100KB", 1)
+遍历 60KB → 进分支1 → put("<100KB", 2)
+分支2、分支3、else 从头到尾没执行过
+结果: sizeRanges = { "<100KB": 2 }   ← 只剩 1 项！其他 3 个区间全丢
+```
+
+> **关键认知：`getOrDefault` 解决的是「同区间首次命中时从 0 正确计数」，不是「区间一定出现」。**
+> 它救不了「从未命中的区间」。要保证区间必出现，必须**预先 put（预初始化）**。
+
+### 4× stream filter 写法（顺序固定 + 空区间不丢，但 O(4n)）
+
+```java
+sizeRanges.put("<100KB",        picSizes.stream().filter(s -> s < 100 * 1024).count());
+sizeRanges.put("100KB-500KB",   picSizes.stream().filter(s -> s >= 100 * 1024 && s < 500 * 1024).count());
+sizeRanges.put("500KB-1MB",     picSizes.stream().filter(s -> s >= 500 * 1024 && s < 1024 * 1024).count());
+sizeRanges.put(">1MB",          picSizes.stream().filter(s -> s >= 1024 * 1024).count());
+```
+
+- ✅ 顺序固定：每个区间显式 put，顺序写死。
+- ✅ 空区间不丢：`count()` 返回 0 也 put 进去。
+- ✅ 边界严谨：`>=` / `<` 严格衔接，无重叠无遗漏。
+- ⚠️ **O(4n)**：4 个独立 stream，每个都遍历一遍 picSizes。
+- ⚠️ **阈值重复**：`100*1024` 在相邻两行各写一次，改阈值要改两处，易错。
+
+数据量不大时清晰够用；数据量大时 4 倍遍历浪费。
+
+### 最终最优方案：预初始化 + forEach merge（单次遍历 O(n)）
+
+核心思想：**把「定义区间」和「统计数据」解耦** —— 先预初始化 4 个区间为 0，再让数据往里填。
+
+```java
+// 1. 预初始化所有区间为 0: 顺序固定(由 put 顺序决定) + 空区间也出现
+Map<String, Long> sizeRanges = new LinkedHashMap<>();
+sizeRanges.put("<100KB", 0L);
+sizeRanges.put("100KB-500KB", 0L);
+sizeRanges.put("500KB-1MB", 0L);
+sizeRanges.put(">1MB", 0L);
+// 2. 只遍历一次 picSizes, 每张图 O(1) 落入对应区间累加(else if 级联, 阈值不重复)
+picSizes.forEach(picSize -> {
+    if (picSize < 100 * 1024) {
+        sizeRanges.merge("<100KB", 1L, Long::sum);
+    } else if (picSize < 500 * 1024) {
+        sizeRanges.merge("100KB-500KB", 1L, Long::sum);
+    } else if (picSize < 1024 * 1024) {
+        sizeRanges.merge("500KB-1MB", 1L, Long::sum);
+    } else {
+        sizeRanges.merge(">1MB", 1L, Long::sum);
+    }
+});
+```
+
+为什么同时满足所有要求：
+
+- **单次遍历 O(n)**：forEach 只过一遍，每张图用 else if 级联 O(1) 判断。
+- **顺序固定**：由预初始化的 put 顺序决定，不依赖数据。
+- **空区间不丢**：遍历前就 put 了（值 0），没命中也是 `count=0`。
+- **阈值不重复**：else if 级联自带「≥下界」语义，每个阈值（100K/500K/1M）只出现一次。
+- `merge(key, 1L, Long::sum)`：key 不存在放 `1L`，存在则 `旧值+1`。
+
+### 三版写法总对比
+
+| 写法                              | 遍历 | 顺序固定 | 空区间不丢 | 阈值重复 |
+|--------------------------------|----|------|-------|------|
+| forEach + getOrDefault（原始）       | 1  | ❌ 依赖数据 | ❌ 丢   | 否    |
+| 4× stream filter                | 4  | ✅    | ✅     | 是    |
+| **预初始化 + forEach merge（采用）** | **1** | ✅    | ✅     | **否** |
+
+> **一句话：预初始化区间是让「单次遍历」也能保序 + 不丢空区间的关键。** 把区间定义和数据统计解耦，顺序/空区间/性能三个问题就一起消失了。
+
+---
+
+## Controller 的 null 校验为什么不必要（重复校验问题）
+
+### 现象
+
+每个分析接口，Controller 和 Service 都校验请求对象是否为 null：
+
+```java
+// Controller
+ThrowUtils.throwIf(spaceSizeAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+// Service
+ThrowUtils.throwIf(spaceSizeAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+```
+
+是不是重复？
+
+### Controller 的 null 校验基本是死代码 ⚠️
+
+关键：`@RequestBody` **默认 `required = true`**。
+
+> 如果 HTTP 请求**没有 body**（空请求体），Spring MVC 在**参数绑定阶段**就直接返回 **400 Bad Request**，根本进不到 Controller 方法。
+
+所以只要方法被执行，`@RequestBody` 拿到的参数**永远不会是 null**。Controller 里那行 `throwIf(req == null)` 在标准 `@RequestBody` 下**永远走不到**——除非写成 `@RequestBody(required = false)`，空 body 才会传 null。
+
+### Controller 各种参数的 null 校验是否必要
+
+| 参数类型                          | 缺失时 Spring 行为 | Controller 手写 null 校验 |
+|-------------------------------|---------------|----------------------|
+| `@RequestBody`（默认 required=true） | 空 body → 直接 400 | ❌ 多余（死代码）            |
+| `@RequestBody(required=false)`  | 空 body → 传 null | ✅ 有意义                |
+| `@RequestParam`               | 缺失 → 400      | ❌ 多余                  |
+| `@PathVariable`               | 缺失 → 404      | ❌ 多余                  |
+
+### Service 层的 null 校验要不要留
+
+**保留。** Service 是可复用的核心逻辑层，可能被其他 Controller / 其他 Service / 定时任务 / 单元测试调用，**不能假设调用方一定传了非 null**。这是「自我保护 / 防御性编程」，和 Controller 的校验目的不同。
+
+### 合理的分层校验分工
+
+| 层           | 该做什么                                                                            | 不该做什么              |
+|-------------|---------------------------------------------------------------------------------|---------------------|
+| **Controller** | 靠 `@RequestBody` 自动挡空 body；**字段级校验用 `@Valid` + JSR303**（`@NotNull`/`@Min` 等注解写在 Request 类上） | 手写 `if (req == null)` |
+| **Service**    | 保留 null 防御 + **业务规则校验**（权限、存在性、范围…）                                              | —                   |
+
+理想写法：Request 类上加注解（如 `SpaceAnalyzeRequest` 的 `spaceId` 加 `@NotNull`），Controller 方法参数加 `@Valid`，把字段校验声明式化，而不是在 Controller 里手写。
+
+### 结论
+
+- **不需要两层都手写 `req == null`**。Controller 那层删掉（对 `@RequestBody` 多余）；Service 留一层防御即可。
+- 团队统一风格两层都写也无害（多一次判断而已），但要知道 **Controller 那行其实拦不到东西**。
+
+> 一句话：`@RequestBody` 默认 required=true 已经替你挡掉空 body，Controller 手写的 null 校验是冗余的；真正的字段校验交给 `@Valid` + JSR303 注解，Service 留一层 null 防御。
