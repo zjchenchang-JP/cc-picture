@@ -5,10 +5,12 @@ import com.zjcc.ccpicturebackend.common.ResultUtils;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceCategoryAnalyzeRequest;
+import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceSizeAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceTagAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceUsageAnalyzeRequest;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceCategoryAnalyzeResponse;
+import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceSizeAnalyzeResponse;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceTagAnalyzeResponse;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceUsageAnalyzeResponse;
 import com.zjcc.ccpicturebackend.service.SpaceAnalyzeService;
@@ -67,5 +69,15 @@ public class SpaceAnalyzeController {
         return ResultUtils.success(resultList);
     }
 
+    /**
+     * 获取空间图片大小 分析
+     */
+    @PostMapping("/size")
+    public BaseResponse<List<SpaceSizeAnalyzeResponse>> getSpaceSizeAnalyze(@RequestBody SpaceSizeAnalyzeRequest spaceSizeAnalyzeRequest, HttpServletRequest request) {
+        ThrowUtils.throwIf(spaceSizeAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+        User loginUser = userService.getLoginUser(request);
+        List<SpaceSizeAnalyzeResponse> spaceSizeAnalyze = spaceAnalyzeService.getSpaceSizeAnalyze(spaceSizeAnalyzeRequest, loginUser);
+        return ResultUtils.success(spaceSizeAnalyze);
+    }
 
 }

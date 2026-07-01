@@ -7,14 +7,12 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceAnalyzeRequest;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceCategoryAnalyzeRequest;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceTagAnalyzeRequest;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceUsageAnalyzeRequest;
+import com.zjcc.ccpicturebackend.model.dto.space.analyze.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceCategoryAnalyzeResponse;
+import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceSizeAnalyzeResponse;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceTagAnalyzeResponse;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceUsageAnalyzeResponse;
 import com.zjcc.ccpicturebackend.service.PictureService;
@@ -24,6 +22,7 @@ import com.zjcc.ccpicturebackend.service.UserService;
 import lombok.AllArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -166,6 +165,45 @@ public class SpaceAnalyzeServiceImpl implements SpaceAnalyzeService {
         return tagCountMap.entrySet().stream()
                 .sorted((e1, e2) -> Long.compare(e2.getValue(), e1.getValue()))
                 .map(e -> new SpaceTagAnalyzeResponse(e.getKey(), e.getValue()))
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<SpaceSizeAnalyzeResponse> getSpaceSizeAnalyze(SpaceSizeAnalyzeRequest spaceSizeAnalyzeRequest, User loginUser) {
+        // 参数校验
+        ThrowUtils.throwIf(spaceSizeAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+        // 权限校验
+        checkSpaceAnalyzeAuth(spaceSizeAnalyzeRequest, loginUser);
+        // 构造查询条件
+        QueryWrapper<Picture> queryWrapper = new QueryWrapper<>();
+        fillAnalyzeQueryWrapper(spaceSizeAnalyzeRequest,queryWrapper);
+        // 查询符合条件的图片 大小
+        queryWrapper.select("picSize");
+        List<Long> picSizes = pictureService.getBaseMapper().selectObjs(queryWrapper)
+                .stream().map(sizeObject -> ((Number) sizeObject).longValue())
+                .collect(Collectors.toList());
+        // 预初始化所有区间为 0: 保证顺序固定(由 put 顺序决定) + 空区间也出现
+        Map<String, Long> sizeRanges = new LinkedHashMap<>();
+        sizeRanges.put("<100KB", 0L);
+        sizeRanges.put("100KB-500KB", 0L);
+        sizeRanges.put("500KB-1MB", 0L);
+        sizeRanges.put(">1MB", 0L);
+        // 只遍历一次 picSizes, 每张图 O(1) 落入对应区间累加(else if 级联, 阈值不重复)
+        picSizes.forEach(picSize -> {
+            if (picSize < 100 * 1024) {
+                sizeRanges.merge("<100KB", 1L, Long::sum);
+            } else if (picSize < 500 * 1024) {
+                sizeRanges.merge("100KB-500KB", 1L, Long::sum);
+            } else if (picSize < 1024 * 1024) {
+                sizeRanges.merge("500KB-1MB", 1L, Long::sum);
+            } else {
+                sizeRanges.merge(">1MB", 1L, Long::sum);
+            }
+        });
+        // 封装响应对象
+        return sizeRanges.entrySet()
+                .stream()
+                .map(entry -> new SpaceSizeAnalyzeResponse(entry.getKey(), entry.getValue()))
                 .collect(Collectors.toList());
     }
 
