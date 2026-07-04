@@ -4895,3 +4895,149 @@ ThrowUtils.throwIf(spaceSizeAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
 - 团队统一风格两层都写也无害（多一次判断而已），但要知道 **Controller 那行其实拦不到东西**。
 
 > 一句话：`@RequestBody` 默认 required=true 已经替你挡掉空 body，Controller 手写的 null 校验是冗余的；真正的字段校验交给 `@Valid` + JSR303 注解，Service 留一层 null 防御。
+
+---
+
+## 本地锁 + 事务 创建私有空间：并发控制与 exists() 为什么防不住并发
+
+### 背景
+
+`addSpace` 用 `synchronized(String.valueOf(userId).intern()) + transactionTemplate.execute`（事务内 `exists` + `save`）来保证「同一用户只能创建一个私有空间」：
+
+```java
+String lock = String.valueOf(userId).intern();
+synchronized (lock) {
+    Long newSpaceId = transactionTemplate.execute(status -> {
+        boolean exists = this.lambdaQuery().eq(Space::getUserId, userId).exists();
+        ThrowUtils.throwIf(exists, ErrorCode.OPERATION_ERROR, "每个用户只能有1个私有空间");
+        boolean result = this.save(space);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+        return space.getId();
+    });
+}
+```
+
+围绕它有两个问题：
+1. 分布式部署下还可靠吗？还有什么方式实现？
+2. 既然已经判断了 `exists()`，为什么并发下还是会重复创建？
+
+---
+
+### Q1：本地锁的能力边界 & 其他实现方式
+
+| 部署方式        | synchronized 有效吗 | 结论                              |
+|-------------|-------------------|---------------------------------|
+| 单机（单 JVM）   | ✅ 有效              | 同一 userId 请求串行，exists + save 之间无并发 |
+| 集群（多实例）     | ❌ 失效              | 各实例锁各的 JVM 对象，跨实例并发 → **重复创建**   |
+
+> `synchronized` 是 JVM 级锁。集群下每个实例是独立 JVM，锁不共享，互不感知。代码里的 `TODO 分布式锁` 正是指这个漏洞。
+
+#### 其他实现方式
+
+**① 数据库唯一索引（最可靠，终极兜底）⭐⭐**
+
+- 注释里顾虑「userId 唯一索引不利于团队空间扩展」——用**联合唯一索引**解决：
+  ```sql
+  UNIQUE KEY uk_user_spaceType (userId, spaceType)
+  ```
+  前提是给 `Space` 加个 `spaceType` 字段（0=私有 / 1=团队，当前实体还没这个字段）。私有空间唯一、团队空间允许多个，扩展性问题消失。
+- 或：团队空间走独立成员关系表（`space_user`），`space.userId` 只代表私有空间拥有者 → 直接 `userId` 唯一也不影响团队。
+- 代码里 `catch DuplicateKeyException` 转成业务异常即可。
+- **数据库层强保证，不依赖时序、不依赖锁、不依赖事务隔离。**
+
+**② 分布式锁（Redis Redisson）⭐⭐**
+
+```java
+RLock lock = redissonClient.getLock("space:create:" + userId);
+try {
+    if (!lock.tryLock(0, 30, TimeUnit.SECONDS)) {
+        throw new BusinessException(ErrorCode.OPERATION_ERROR, "操作过于频繁");
+    }
+    // 拿到锁后再 exists + save（逻辑同现在，只是锁换了）
+} finally {
+    if (lock.isHeldByCurrentThread()) lock.unlock();
+}
+```
+锁 key 带 `userId`，同一用户跨实例串行，不同用户互不影响。是本地 `synchronized` 的集群升级版。
+
+**③ Redis 防重 token / SETNX**
+
+前端先申请唯一 token，创建请求带上 token，服务端用 token 在 Redis 做幂等；或 `SETNX space:creating:{userId}` 标记「正在创建」。更适合防用户快速双击重复提交。
+
+#### 最佳实践：唯一索引（必须有）+ 分布式锁（集群高并发时加）
+
+- **唯一索引是数据一致性的最后防线**，任何方案都该有它兜底（锁都可能失效，数据库不会）。
+- 分布式锁是「优化」：集群下在应用层提前拦截冲突，避免请求都打到 DB 才报唯一键冲突。
+- 单纯防重复，只用唯一索引就够。
+
+---
+
+### Q2：为什么单靠 `exists()` 防不住并发（TOCTOU 竞态）
+
+常见误解：「另一个线程拿到锁后，也会判断已经存在」。
+这句话的隐藏前提是 **串行**（一个线程把 check + save 做完，另一个才开始）。**锁的唯一作用就是强迫 B 等 A 做完；一旦锁失效，B 不等 A，B 的 exists 就会在 A 还没 save 时执行 → 查不到 → 重复。**
+
+#### 单机（锁有效 → 串行，正常）
+
+```
+线程A                      线程B
+──────────────────────────────────────
+拿到锁
+exists() → false
+save() → 提交 ✓
+释放锁
+                           拿到锁（等A释放后）
+                           exists() → true   ← A已提交，查得到
+                           拒绝 ✓
+```
+
+#### 集群（锁失效 → 并发，重复）
+
+```
+线程A（实例1）              线程B（实例2）
+──────────────────────────────────────
+拿到【实例1的锁】            拿到【实例2的锁】   ← 两把不同的锁！互不感知
+exists() → false
+                           exists() → false  ← A还没save，查不到
+save() → 提交 ✓
+                           save() → 也提交 ✓  ← 重复创建！
+```
+
+关键：分布式下两个实例的本地锁是**两把不同的锁**，两个线程**同时**进入各自临界区，**同时**执行 `exists()`；而两个 `exists()` 都在对方 `save()` **之前**执行 → 都查到 false → 都 save → 重复。
+
+> `exists()` 只是个「读」，**阻止不了别人在它之后写入**。它和 `save()` 之间有个时间间隙，并发请求能同时挤进这个间隙，都查到 false。这就是经典的 **TOCTOU 竞态**（Time-Of-Check to Time-Of-Use）。
+
+#### 更糟：事务隔离让 exists 更不可靠
+
+MySQL 默认 REPEATABLE READ 下，对方事务**未提交的 insert 你读不到**：
+
+```
+事务A: exists() → false → save()   （还没提交）
+事务B: exists() → 读不到 A 未提交的 insert → false → save() → 重复！
+```
+
+两个并发事务都「自信地」认为空间不存在，然后都插入。事务隔离在这里反而帮倒忙——它让你看不到对方正在做的事。
+
+#### 真正防住的是：数据库唯一索引
+
+```
+事务A: save() → 提交 ✓
+事务B: save() → 💥 数据库抛 DuplicateKeyException（唯一键冲突）
+```
+
+唯一索引是**写入时的硬约束**，不依赖任何时序、锁、事务隔离。两个 save 同时来，数据库内部保证只有一个成功，另一个直接报错。
+
+---
+
+### 总结
+
+| 机制                | 防并发重复？        | 为什么                                  |
+|-------------------|----------------|--------------------------------------|
+| 只靠 `exists()` 检查  | ❌ 防不住          | check 和 save 之间有间隙，并发请求同时挤进去都查到 false   |
+| `exists()` + 本地锁   | ✅ 单机 / ❌ 集群    | 单机锁串行化 check+save；集群锁跨不了 JVM         |
+| `exists()` + 分布式锁  | ✅              | 跨实例串行化                               |
+| **数据库唯一索引**       | ✅✅ 最稳          | 写入层硬约束，不依赖时序，终极兜底                     |
+
+> **一句话：`exists()` 是「看一眼有没有」，管不住别人在你看完之后写。锁的作用是让别人「等你写完再看」；锁一失效，大家就同时看、同时写。唯一索引是「写的时候数据库直接拒绝第二个」，这才是真正可靠的防线。**
+>
+> 所以「加锁 + exists」这套方案，**锁是主角，exists 只是配合**；锁一旦失效（上集群），整个防线就塌了——这也是为什么唯一索引是必须的兜底。
