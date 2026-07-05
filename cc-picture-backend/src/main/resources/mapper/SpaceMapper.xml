@@ -5,23 +5,24 @@
 <mapper namespace="com.zjcc.ccpicturebackend.mapper.SpaceMapper">
 
     <resultMap id="BaseResultMap" type="com.zjcc.ccpicturebackend.model.entity.Space">
-            <id property="id" column="id" />
-            <result property="spaceName" column="spaceName" />
-            <result property="spaceLevel" column="spaceLevel" />
-            <result property="maxSize" column="maxSize" />
-            <result property="maxCount" column="maxCount" />
-            <result property="totalSize" column="totalSize" />
-            <result property="totalCount" column="totalCount" />
-            <result property="userId" column="userId" />
-            <result property="createTime" column="createTime" />
-            <result property="editTime" column="editTime" />
-            <result property="updateTime" column="updateTime" />
-            <result property="isDelete" column="isDelete" />
+        <id property="id" column="id"/>
+        <result property="spaceName" column="spaceName"/>
+        <result property="spaceLevel" column="spaceLevel"/>
+        <result property="maxSize" column="maxSize"/>
+        <result property="maxCount" column="maxCount"/>
+        <result property="totalSize" column="totalSize"/>
+        <result property="totalCount" column="totalCount"/>
+        <result property="userId" column="userId"/>
+        <result property="createTime" column="createTime"/>
+        <result property="editTime" column="editTime"/>
+        <result property="updateTime" column="updateTime"/>
+        <result property="isDelete" column="isDelete"/>
+        <result property="spaceType" column="spaceType" jdbcType="INTEGER"/>
     </resultMap>
 
     <sql id="Base_Column_List">
         id,spaceName,spaceLevel,maxSize,maxCount,totalSize,
-        totalCount,userId,createTime,editTime,updateTime,
+        totalCount,spaceType,userId,createTime,editTime,updateTime,
         isDelete
     </sql>
 
@@ -35,7 +36,9 @@
 
     <!-- 删除某用户的所有空间 -->
     <delete id="deleteByUserId">
-        DELETE FROM space WHERE userId = #{userId}
+        DELETE
+        FROM space
+        WHERE userId = #{userId}
     </delete>
 
 </mapper>

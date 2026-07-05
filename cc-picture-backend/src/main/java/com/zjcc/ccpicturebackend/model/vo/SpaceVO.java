@@ -104,4 +104,10 @@ public class SpaceVO implements Serializable {
         BeanUtils.copyProperties(space, spaceVO);
         return spaceVO;
     }
+
+    /**
+     * 空间类型：0-私有 1-团队
+     */
+    private Integer spaceType;
+
 }

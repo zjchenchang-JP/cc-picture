@@ -4897,6 +4897,7 @@ ThrowUtils.throwIf(spaceSizeAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
 > 一句话：`@RequestBody` 默认 required=true 已经替你挡掉空 body，Controller 手写的 null 校验是冗余的；真正的字段校验交给 `@Valid` + JSR303 注解，Service 留一层 null 防御。
 
 ---
+# 2026/07/05
 
 ## 本地锁 + 事务 创建私有空间：并发控制与 exists() 为什么防不住并发
 
