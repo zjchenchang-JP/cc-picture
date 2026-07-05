@@ -11,10 +11,7 @@ import com.zjcc.ccpicturebackend.model.dto.space.analyze.*;
 import com.zjcc.ccpicturebackend.model.entity.Picture;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceCategoryAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceSizeAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceTagAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceUsageAnalyzeResponse;
+import com.zjcc.ccpicturebackend.model.vo.space.analyze.*;
 import com.zjcc.ccpicturebackend.service.PictureService;
 import com.zjcc.ccpicturebackend.service.SpaceAnalyzeService;
 import com.zjcc.ccpicturebackend.service.SpaceService;
@@ -205,6 +202,46 @@ public class SpaceAnalyzeServiceImpl implements SpaceAnalyzeService {
                 .stream()
                 .map(entry -> new SpaceSizeAnalyzeResponse(entry.getKey(), entry.getValue()))
                 .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<SpaceUserAnalyzeResponse> getSpaceUserAnalyze(SpaceUserAnalyzeRequest spaceUserAnalyzeRequest, User loginUser) {
+
+        // 参数校验
+        ThrowUtils.throwIf(spaceUserAnalyzeRequest == null,ErrorCode.PARAMS_ERROR);
+        // 权限校验
+        checkSpaceAnalyzeAuth(spaceUserAnalyzeRequest,loginUser);
+        // 构造查询条件
+        QueryWrapper<Picture> queryWrapper = new QueryWrapper<>();
+        fillAnalyzeQueryWrapper(spaceUserAnalyzeRequest, queryWrapper);
+        Long userId = spaceUserAnalyzeRequest.getUserId();
+        queryWrapper.eq(Objects.nonNull(userId), "userId", userId);
+        // 分析维度 每日 每周 每月
+        String timeDimension = spaceUserAnalyzeRequest.getTimeDimension();
+        //  MySQL 日期时间函数对图片的创建时间进行格式化，使同一天（周 / 月）的值相同，就能够统一按照一个字段（period）进行分组和排序了
+        switch (timeDimension) {
+            case "day":
+                queryWrapper.select("DATE_FORMAT(createTime, '%Y-%m-%d') AS period", "COUNT(*) AS count");
+                break;
+            case "week":
+                queryWrapper.select("YEARWEEK(createTime) AS period", "COUNT(*) AS count");
+                break;
+            case "month":
+                queryWrapper.select("DATE_FORMAT(createTime, '%Y-%m') AS period", "COUNT(*) AS count");
+                break;
+            default:
+                throw new BusinessException(ErrorCode.PARAMS_ERROR, "不支持的时间维度");
+        }
+        // 分组查询 和 排序
+        queryWrapper.groupBy("period").orderByAsc("period");
+        // 查询结果并转换
+        List<Map<String, Object>> selectedMaps = pictureService.getBaseMapper().selectMaps(queryWrapper);
+        return selectedMaps.stream()
+                .map(result -> {
+                    String period = result.get("period").toString();
+                    long count = ((Number) result.get("count")).longValue();
+                    return new SpaceUserAnalyzeResponse(period, count);
+                }).collect(Collectors.toList());
     }
 
     /**

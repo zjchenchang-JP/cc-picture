@@ -2,10 +2,7 @@ package com.zjcc.ccpicturebackend.service;
 
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.*;
 import com.zjcc.ccpicturebackend.model.entity.User;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceCategoryAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceSizeAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceTagAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceUsageAnalyzeResponse;
+import com.zjcc.ccpicturebackend.model.vo.space.analyze.*;
 
 import java.util.List;
 
@@ -51,6 +48,14 @@ public interface SpaceAnalyzeService{
      * @return List<SpaceSizeAnalyzeResponse>
      */
     List<SpaceSizeAnalyzeResponse> getSpaceSizeAnalyze(SpaceSizeAnalyzeRequest spaceSizeAnalyzeRequest, User loginUser);
+
+    /**
+     * 用户上传时间分析
+     * @param spaceUserAnalyzeRequest  spaceUserAnalyzeRequest
+     * @param loginUser 当前登录的用户
+     * @return List<SpaceUserAnalyzeResponse>
+     */
+    List<SpaceUserAnalyzeResponse> getSpaceUserAnalyze(SpaceUserAnalyzeRequest spaceUserAnalyzeRequest, User loginUser);
 
 
 

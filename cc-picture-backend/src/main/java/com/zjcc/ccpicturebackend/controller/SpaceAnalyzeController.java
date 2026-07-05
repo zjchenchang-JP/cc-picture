@@ -4,15 +4,9 @@ import com.zjcc.ccpicturebackend.common.BaseResponse;
 import com.zjcc.ccpicturebackend.common.ResultUtils;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceCategoryAnalyzeRequest;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceSizeAnalyzeRequest;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceTagAnalyzeRequest;
-import com.zjcc.ccpicturebackend.model.dto.space.analyze.SpaceUsageAnalyzeRequest;
+import com.zjcc.ccpicturebackend.model.dto.space.analyze.*;
 import com.zjcc.ccpicturebackend.model.entity.User;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceCategoryAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceSizeAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceTagAnalyzeResponse;
-import com.zjcc.ccpicturebackend.model.vo.space.analyze.SpaceUsageAnalyzeResponse;
+import com.zjcc.ccpicturebackend.model.vo.space.analyze.*;
 import com.zjcc.ccpicturebackend.service.SpaceAnalyzeService;
 import com.zjcc.ccpicturebackend.service.UserService;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -78,6 +72,17 @@ public class SpaceAnalyzeController {
         User loginUser = userService.getLoginUser(request);
         List<SpaceSizeAnalyzeResponse> spaceSizeAnalyze = spaceAnalyzeService.getSpaceSizeAnalyze(spaceSizeAnalyzeRequest, loginUser);
         return ResultUtils.success(spaceSizeAnalyze);
+    }
+
+    /**
+     * 获取用户上传行为 分析
+     */
+    @PostMapping("/user")
+    public BaseResponse<List<SpaceUserAnalyzeResponse>> getSpaceUserAnalyze(@RequestBody SpaceUserAnalyzeRequest spaceUserAnalyzeRequest, HttpServletRequest request) {
+        ThrowUtils.throwIf(spaceUserAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+        User loginUser = userService.getLoginUser(request);
+        List<SpaceUserAnalyzeResponse> resultList = spaceAnalyzeService.getSpaceUserAnalyze(spaceUserAnalyzeRequest, loginUser);
+        return ResultUtils.success(resultList);
     }
 
 }
