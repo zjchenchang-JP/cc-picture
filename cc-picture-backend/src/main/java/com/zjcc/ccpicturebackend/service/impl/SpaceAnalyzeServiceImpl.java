@@ -244,6 +244,23 @@ public class SpaceAnalyzeServiceImpl implements SpaceAnalyzeService {
                 }).collect(Collectors.toList());
     }
 
+    @Override
+    public List<Space> getSpaceRankAnalyze(SpaceRankAnalyzeRequest spaceRankAnalyzeRequest, User loginUser) {
+        ThrowUtils.throwIf(spaceRankAnalyzeRequest == null, ErrorCode.PARAMS_ERROR);
+        // 仅管理员可查看空间排行
+        ThrowUtils.throwIf(!userService.isAdmin(loginUser),ErrorCode.NO_AUTH_ERROR,"无权限查看空间排行");
+        // 构造查询条件
+        //  SELECT id, spaceName, userId, totalSize
+        //  FROM space
+        //  ORDER BY totalSize DESC
+        //  LIMIT #{topN}
+        QueryWrapper<Space> queryWrapper = new QueryWrapper<>();
+        queryWrapper.select("id", "spaceName", "userId", "totalSize")
+                .orderByDesc("totalSize")
+                .last("LIMIT " + spaceRankAnalyzeRequest.getTopN());// 取前 N 名
+        return spaceService.list(queryWrapper);
+    }
+
     /**
      * 根据分析范围填充限定查询条件
      *

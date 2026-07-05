@@ -1,6 +1,7 @@
 package com.zjcc.ccpicturebackend.service;
 
 import com.zjcc.ccpicturebackend.model.dto.space.analyze.*;
+import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.vo.space.analyze.*;
 
@@ -57,7 +58,13 @@ public interface SpaceAnalyzeService{
      */
     List<SpaceUserAnalyzeResponse> getSpaceUserAnalyze(SpaceUserAnalyzeRequest spaceUserAnalyzeRequest, User loginUser);
 
-
+    /**
+     * 空间使用排行 仅管理员可用
+     * @param spaceRankAnalyzeRequest spaceRankAnalyzeRequest
+     * @param loginUser 当前登录的用户
+     * @return List<Space>
+     */
+    List<Space> getSpaceRankAnalyze(SpaceRankAnalyzeRequest spaceRankAnalyzeRequest, User loginUser);
 
 
 }
