@@ -255,6 +255,7 @@ public class SpaceAnalyzeServiceImpl implements SpaceAnalyzeService {
         //  ORDER BY totalSize DESC
         //  LIMIT #{topN}
         QueryWrapper<Space> queryWrapper = new QueryWrapper<>();
+        // 性能优化 更复杂多样的分析需求，其实我们还可以自己在xml 中编写 SQL 语句，灵活使用索引Index
         queryWrapper.select("id", "spaceName", "userId", "totalSize")
                 .orderByDesc("totalSize")
                 .last("LIMIT " + spaceRankAnalyzeRequest.getTopN());// 取前 N 名
