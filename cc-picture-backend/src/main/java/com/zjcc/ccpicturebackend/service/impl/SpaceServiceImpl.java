@@ -15,6 +15,7 @@ import com.zjcc.ccpicturebackend.model.dto.space.SpaceQueryRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.SpaceLevelEnum;
+import com.zjcc.ccpicturebackend.model.enums.SpaceTypeEnum;
 import com.zjcc.ccpicturebackend.model.vo.SpaceVO;
 import com.zjcc.ccpicturebackend.model.vo.UserVO;
 import com.zjcc.ccpicturebackend.service.SpaceService;
@@ -61,6 +62,9 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
         if (spaceAddRequest.getSpaceLevel() == null) {
             space.setSpaceLevel(SpaceLevelEnum.COMMON.getValue());
         }
+        if (spaceAddRequest.getSpaceType() == null) {
+            spaceAddRequest.setSpaceType(SpaceTypeEnum.PRIVATE.getValue());
+        }
         // 填充数据
         fillSpaceBySpaceLevel(space);
         // 数据校验
@@ -80,8 +84,12 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
         String lock = String.valueOf(userId).intern();
         synchronized (lock) {
             Long newSpaceId = transactionTemplate.execute(status -> {
-                boolean exists = this.lambdaQuery().eq(Space::getUserId, userId).exists();
-                ThrowUtils.throwIf(exists, ErrorCode.OPERATION_ERROR, "每个用户只能有1个私有空间");
+                boolean exists = this.lambdaQuery()
+                        .eq(Space::getUserId, userId)
+                        // 普通用户每类空间只能创建 1 个; 补充 spaceType 作为查询条件
+                        .eq(Space::getSpaceType,spaceAddRequest.getSpaceType())
+                        .exists();
+                ThrowUtils.throwIf(exists, ErrorCode.OPERATION_ERROR, "每个用户每类空间仅能创建1个");
                 boolean result = this.save(space);
                 ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
                 // 返回新插入的数据id 主键回填
@@ -98,10 +106,14 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
         String spaceName = space.getSpaceName();
         Integer spaceLevel = space.getSpaceLevel();
         SpaceLevelEnum spaceLevelEnum = SpaceLevelEnum.getEnumByValue(spaceLevel);
+        Integer spaceType = space.getSpaceType();
+        SpaceTypeEnum spaceTypeEnum = SpaceTypeEnum.getEnumByValue(spaceType);
+
         // 创建时 前端空间名和空间级别必须传
         if (add) {
             ThrowUtils.throwIf(StrUtil.isBlank(spaceName),ErrorCode.PARAMS_ERROR,"空间名称不能为空");
             ThrowUtils.throwIf(null == spaceLevel,ErrorCode.PARAMS_ERROR,"空间级别不能为空");
+            ThrowUtils.throwIf(null == spaceType, ErrorCode.PARAMS_ERROR, "空间类型不能为空");
         }
         // 编辑时 如果要修改空间级别或空间名
         if (spaceLevel != null && spaceLevelEnum == null) {
@@ -109,6 +121,10 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
         }
         if (StrUtil.isNotBlank(spaceName) && spaceName.length() > 30) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "空间名太长");
+        }
+        // 修改数据时，如果要改空间级别
+        if (spaceType != null && spaceLevelEnum == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "空间类型不存在");
         }
     }
 

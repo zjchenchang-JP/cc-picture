@@ -109,6 +109,8 @@ ALTER TABLE space
 CREATE INDEX idx_spaceType ON space (spaceType);
 
 -- 空间成员表
+-- 不需要逻辑删除字段，因为用户退出就直接删除可以
+-- 如果加上逻辑删除，那么如果我们同一个用户添加的话由于我们 spaceId, userId 都有 UNIQUE 的设计，插入用户就会变得比较麻烦
 create table if not exists space_user
 (
     id         bigint auto_increment comment 'id' primary key,
