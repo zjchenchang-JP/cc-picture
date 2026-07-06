@@ -5042,3 +5042,103 @@ MySQL 默认 REPEATABLE READ 下，对方事务**未提交的 insert 你读不�
 > **一句话：`exists()` 是「看一眼有没有」，管不住别人在你看完之后写。锁的作用是让别人「等你写完再看」；锁一失效，大家就同时看、同时写。唯一索引是「写的时候数据库直接拒绝第二个」，这才是真正可靠的防线。**
 >
 > 所以「加锁 + exists」这套方案，**锁是主角，exists 只是配合**；锁一旦失效（上集群），整个防线就塌了——这也是为什么唯一索引是必须的兜底。
+
+---
+
+## createTime / updateTime 自动填充：不要手动 set
+
+### 问题
+
+`spaceUser.setCreateTime(new Date())` 需要手动设置吗？什么注解或方式能保证自动？
+
+### 项目现状
+
+Grep `MetaObjectHandler` / `FieldFill` 零匹配 → 项目**没配 MyBatis-Plus 自动填充**（无全局 Handler，实体无 fill 注解）。`User` / `Space` / `SpaceUser` / `Picture` 四个实体的 `createTime` / `updateTime` 都没加注解。要么靠数据库默认值，要么漏填了。
+
+### 不用手动 set，三种自动方式
+
+#### 方式一：MyBatis-Plus 自动填充（推荐 ⭐，应用层统一管）
+
+两步：
+
+**① 实体字段加注解：**
+
+```java
+@TableField(fill = FieldFill.INSERT)          // 插入时填, 之后不变
+private Date createTime;
+
+@TableField(fill = FieldFill.INSERT_UPDATE)   // 插入和更新时都填
+private Date updateTime;
+```
+
+**② 新建全局 Handler**（所有实体共用一个）：
+
+```java
+package com.zjcc.ccpicturebackend.config;
+
+import com.baomidou.mybatisplus.core.handlers.MetaObjectHandler;
+import org.apache.ibatis.reflection.MetaObject;
+import org.springframework.stereotype.Component;
+import java.util.Date;
+
+@Component
+public class MyMetaObjectHandler implements MetaObjectHandler {
+    @Override
+    public void insertFill(MetaObject metaObject) {
+        this.strictInsertFill(metaObject, "createTime", Date.class, new Date());
+        this.strictInsertFill(metaObject, "updateTime", Date.class, new Date());
+    }
+    @Override
+    public void updateFill(MetaObject metaObject) {
+        this.strictUpdateFill(metaObject, "updateTime", Date.class, new Date());
+    }
+}
+```
+
+配好后：insert 自动填 `createTime` + `updateTime`，update 自动刷新 `updateTime`。所有加了注解的实体都生效，业务代码里不用再 set，现有 `setCreateTime` 全删。
+
+> 优点：一次配置全局通用、不依赖数据库方言、应用层可控（以后还能顺便填 `userId` 这类审计字段）。项目用 MP，首选。
+
+#### 方式二：数据库默认值（可能项目现状就是这个）
+
+```sql
+createTime DATETIME DEFAULT CURRENT_TIMESTAMP,
+updateTime DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+```
+
+数据库自己填。配合 MP 默认的 `FieldStrategy.NOT_NULL`（null 字段不进 SQL），`createTime=null` 时不会被带进 INSERT，数据库用默认值兜底。
+
+**确认方法**：执行 `SHOW CREATE TABLE space_user;`，看 `createTime` / `updateTime` 有没有 `DEFAULT CURRENT_TIMESTAMP`。如果有，数据能正常填；如果是 `NOT NULL` 且无 DEFAULT，insert 不传会报错。
+
+#### 方式三：手动 set（最不推荐）
+
+```java
+spaceUser.setCreateTime(new Date());
+spaceUser.setUpdateTime(new Date());
+```
+
+每个 save 前都要写，极易漏。
+
+### `FieldFill` 策略说明
+
+| FieldFill          | 何时填充       | 用在                                   |
+|--------------------|------------|----------------------------------------|
+| `INSERT`           | 插入时        | `createTime`（创建后不变）                  |
+| `UPDATE`           | 更新时        | 一般不单独用                                |
+| `INSERT_UPDATE`    | 插入和更新时     | `updateTime`（创建时填、更新时刷新）              |
+
+### 三种方式对比
+
+| 方式         | 谁填        | 优点                  | 缺点                       |
+|------------|-----------|---------------------|--------------------------|
+| **MP 自动填充**  | 应用层（MP）   | 跨数据库、统一管、可扩展审计字段    | 要配 Handler + 注解          |
+| 数据库默认值      | 数据库       | 零代码，DDL 搞定          | 依赖数据库方言；MP 字段映射可能干扰      |
+| 手动 set     | 代码        | 直观                  | 易漏、重复                    |
+
+### 结论
+
+- **不用手动 `setCreateTime`**。
+- 推荐方式一（MP 自动填充）：给四实体加 `@TableField(fill=...)` + 建一个 `MyMetaObjectHandler`，一次配置全局生效。
+- 配前先验证现状：查一条数据看 `createTime` 有没有值 —— 有值说明方式二在生效；是 null 就要补。
+
+> **一句话：`@TableField(fill = FieldFill.INSERT / INSERT_UPDATE)` + 一个 `MetaObjectHandler`，`createTime` / `updateTime` 就全自动了，从此告别手动 set。**
