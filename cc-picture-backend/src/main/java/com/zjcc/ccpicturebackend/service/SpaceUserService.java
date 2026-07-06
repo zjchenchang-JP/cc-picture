@@ -2,9 +2,11 @@ package com.zjcc.ccpicturebackend.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.zjcc.ccpicturebackend.model.dto.spaceuser.SpaceUserAddRequest;
+import com.zjcc.ccpicturebackend.model.dto.spaceuser.SpaceUserEditRequest;
 import com.zjcc.ccpicturebackend.model.dto.spaceuser.SpaceUserQueryRequest;
 import com.zjcc.ccpicturebackend.model.entity.SpaceUser;
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.vo.SpaceUserVO;
 
 import javax.servlet.http.HttpServletRequest;
@@ -52,4 +54,7 @@ public interface SpaceUserService extends IService<SpaceUser> {
      * @return
      */
     QueryWrapper<SpaceUser> getQueryWrapper(SpaceUserQueryRequest spaceUserQueryRequest);
+
+
+    boolean editSpaceUser(SpaceUserEditRequest spaceUserEditRequest, User loginUser);
 }

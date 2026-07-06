@@ -10,6 +10,7 @@ import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.model.dto.spaceuser.SpaceUserAddRequest;
+import com.zjcc.ccpicturebackend.model.dto.spaceuser.SpaceUserEditRequest;
 import com.zjcc.ccpicturebackend.model.dto.spaceuser.SpaceUserQueryRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
 import com.zjcc.ccpicturebackend.model.entity.SpaceUser;
@@ -181,6 +182,48 @@ public class SpaceUserServiceImpl extends ServiceImpl<SpaceUserMapper, SpaceUser
         queryWrapper.eq(ObjUtil.isNotEmpty(userId), "userId", userId);
         queryWrapper.eq(ObjUtil.isNotEmpty(spaceRole), "spaceRole", spaceRole);
         return queryWrapper;
+    }
+
+    @Override
+    public boolean editSpaceUser(SpaceUserEditRequest spaceUserEditRequest, User loginUser) {
+
+        ThrowUtils.throwIf(spaceUserEditRequest == null || spaceUserEditRequest.getId() <= 0,
+                ErrorCode.PARAMS_ERROR);
+
+        // 【需求1】校验目标成员存在 —— 只有已经是成员才能被编辑
+        Long id = spaceUserEditRequest.getId();
+        SpaceUser oldSpaceUser = this.getById(id);
+        ThrowUtils.throwIf(oldSpaceUser == null, ErrorCode.NOT_FOUND_ERROR, "成员不存在");
+
+        // 权限校验: loginUser 必须是该空间的管理员, 才能改别人角色
+        // Space space = spaceService.getById(oldSpaceUser.getSpaceId());
+        // ThrowUtils.throwIf(!space.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser),
+        //         ErrorCode.NO_AUTH_ERROR);
+
+        // 校验新角色合法(复用 validSpaceUser 的编辑分支)
+        String newRole = spaceUserEditRequest.getSpaceRole();
+        SpaceUser validEntity = new SpaceUser();
+        validEntity.setSpaceRole(newRole);
+        validSpaceUser(validEntity, false);
+
+        // 【需求2】角色没变就不更新, 直接返回(省一次写)
+        // 性能优化
+        if (newRole != null && newRole.equals(oldSpaceUser.getSpaceRole())) {
+            return true;
+        }
+
+        // 角色变了, 只更新 spaceRole 字段(不全字段覆盖)
+        // 生成: UPDATE space_user SET spaceRole = ? WHERE id = ?
+        // 性能优化
+        // 如果把 oldSpaceUser 整个 updateById
+        // oldSpaceUser.setSpaceRole(newRole);
+        // this.updateById(oldSpaceUser);
+        // 生成: UPDATE space_user SET spaceRole=?, spaceId=?, userId=?, createTime=?, ... WHERE id=?
+        // 把所有字段都写一遍(值没变也写), 还可能覆盖 updateTime
+        return this.lambdaUpdate()
+                .eq(SpaceUser::getId, id)
+                .set(SpaceUser::getSpaceRole, newRole)
+                .update();
     }
 }
 
