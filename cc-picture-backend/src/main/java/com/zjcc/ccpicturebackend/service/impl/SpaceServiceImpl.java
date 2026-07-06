@@ -13,25 +13,26 @@ import com.zjcc.ccpicturebackend.exception.ThrowUtils;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceAddRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceQueryRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
+import com.zjcc.ccpicturebackend.model.entity.SpaceUser;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.SpaceLevelEnum;
+import com.zjcc.ccpicturebackend.model.enums.SpaceRoleEnum;
 import com.zjcc.ccpicturebackend.model.enums.SpaceTypeEnum;
 import com.zjcc.ccpicturebackend.model.vo.SpaceVO;
 import com.zjcc.ccpicturebackend.model.vo.UserVO;
 import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.mapper.SpaceMapper;
+import com.zjcc.ccpicturebackend.service.SpaceUserService;
 import com.zjcc.ccpicturebackend.service.UserService;
 import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 /**
@@ -49,6 +50,8 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
     // 编程式事务
     @Resource
     private TransactionTemplate transactionTemplate;
+    @Resource
+    private SpaceUserService spaceUserService;
 
     @Override
     public long addSpace(SpaceAddRequest spaceAddRequest, User loginUser) {
@@ -92,6 +95,15 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
                 ThrowUtils.throwIf(exists, ErrorCode.OPERATION_ERROR, "每个用户每类空间仅能创建1个");
                 boolean result = this.save(space);
                 ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+                // v2.0 如果是创建团队空间 插入团队成员关联记录 创建人自动是团队空间管理员
+                if (SpaceTypeEnum.TEAM.getValue() == spaceAddRequest.getSpaceType()) {
+                    SpaceUser spaceUser = new SpaceUser();
+                    spaceUser.setSpaceId(space.getId());
+                    spaceUser.setUserId(loginUser.getId());
+                    spaceUser.setSpaceRole(SpaceRoleEnum.ADMIN.getText());
+                    // spaceUser.setCreateTime(new Date()); // 需要手动设置吗？什么注解或方式能保证自动？
+                    spaceUserService.save(spaceUser);
+                }
                 // 返回新插入的数据id 主键回填
                 return space.getId();
             });
