@@ -26,6 +26,7 @@ import com.zjcc.ccpicturebackend.service.SpaceUserService;
 import com.zjcc.ccpicturebackend.service.UserService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
@@ -50,6 +51,8 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
     // 编程式事务
     @Resource
     private TransactionTemplate transactionTemplate;
+
+    @Lazy //解决循环依赖
     @Resource
     private SpaceUserService spaceUserService;
 
