@@ -10,6 +10,7 @@ import com.zjcc.ccpicturebackend.constant.UserConstant;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
+import com.zjcc.ccpicturebackend.manager.auth.StpKit;
 import com.zjcc.ccpicturebackend.model.dto.user.UserQueryRequest;
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.model.enums.UserRoleEnum;
@@ -84,7 +85,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
 
     @Override
     public LoginUserVO userLogin(String userAccount, String userPassword, HttpServletRequest request) {
-        // 校验
+        // 1. 校验
         ThrowUtils.throwIf(StrUtil.hasBlank(userAccount, userPassword),
                 ErrorCode.PARAMS_ERROR, "账号或密码不能为空");
         ThrowUtils.throwIf(userAccount.length() < 4,
@@ -92,7 +93,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         ThrowUtils.throwIf(userPassword.length() < 6,
                 ErrorCode.PARAMS_ERROR, "密码错误");
 
-        // 密码加密
+        //2. 密码加密
         String encryptPassword = getEncryptPassword(userPassword);
         // 查询用户
         LambdaQueryWrapper<User> queryWrapper = new LambdaQueryWrapper<>();
@@ -104,8 +105,13 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
             log.info("user login failed, userAccount cannot math userPassword");
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户名或密码错误");
         }
-        // session记录登录用户
+        // 3.session记录登录用户
         request.getSession().setAttribute(USER_LOGIN_STATE, user);
+
+        // v2.0 引入Sa-token
+        // 4 记录用户登录态到 Sa-token，便于空间鉴权时使用，注意保证该用户信息与 SpringSession 中的信息过期时间一致
+        StpKit.SPACE.login(user.getId());
+        StpKit.SPACE.getSession().set(USER_LOGIN_STATE, user);
         return this.getLoginUserVO(user);
     }
 
