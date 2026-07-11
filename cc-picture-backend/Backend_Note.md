@@ -5142,3 +5142,305 @@ spaceUser.setUpdateTime(new Date());
 - 配前先验证现状：查一条数据看 `createTime` 有没有值 —— 有值说明方式二在生效；是 null 就要补。
 
 > **一句话：`@TableField(fill = FieldFill.INSERT / INSERT_UPDATE)` + 一个 `MetaObjectHandler`，`createTime` / `updateTime` 就全自动了，从此告别手动 set。**
+
+---
+# 2027/07/12
+## Sa-Token 注解合并相关
+### 问题1:`addPathPatterns("/**")` vs `addPathPatterns("/*")` —— 有区别,且区别很大
+
+这是 Spring 的 **Ant 风格路径匹配**,`*` 和 `**` 含义不同:
+
+| 模式 | 匹配范围 | 例子(能匹配) | 例子(不能匹配) |
+|---|---|---|---|
+| `/**` | **任意层级**路径(含多层) | `/a`、`/a/b`、`/a/b/c`、`/` | —(全匹配) |
+| `/*` | **只匹配一层**路径 | `/a`、`/b` | `/a/b`(多层不匹配) |
+| `*` | 单层内的任意字符(不含 `/`) | `/picture` | `/picture/list` |
+
+具体到你项目:
+- 接口路径有多层,如 `/spaceUser/list`、`/picture/list/page`、`/space/user/edit`。
+- 用 `/**`:这些**全部被拦截器拦到** → 注解鉴权生效。✅
+- 用 `/*`:只拦 `/spaceUser`、`/picture` 这种**单层**的;`/spaceUser/list` 这种多层路径**拦不到** → 拦截器没经过 → **注解鉴权直接失效**。❌
+
+所以项目用 `/**` 是对的(全局拦截);写 `/*` 会漏掉所有多层路径接口。
+
+> 一句话:`*` 不跨 `/`,`**` 跨任意层。拦截器要拦全部请求,必须 `/**`。
+
+---
+
+### 问题2:为什么要开启注解合并?—— 不开会让你自定义的 `SaSpaceCheckPermission` 形同虚设
+
+```java
+// SaTokenConfigure :27-29
+SaAnnotationStrategy.instance.getAnnotation = (element, annotationClass) -> {
+    return AnnotatedElementUtils.getMergedAnnotation(element, annotationClass);
+};
+```
+
+这把 Sa-Token 找注解的方式,从 **Java 原生**(`getAnnotation`)换成 **Spring 的 `getMergedAnnotation`**。区别:
+
+| 找注解方式 | 找直接标注 | 找元注解(注解上的注解) | 属性合并 |
+|---|---|---|---|
+| 原生 `getAnnotation` | ✅ | ❌ 不穿透 | ❌ |
+| Spring `getMergedAnnotation` | ✅ | ✅ 穿透 | ✅ |
+
+**关键:你定义的 `SaSpaceCheckPermission` 是组合注解,它上面标了元注解 `@SaCheckPermission`。** 必须用 Spring 的穿透查找,Sa-Token 才能识别。
+
+#### 不开启时的具体反例 ⚠️
+
+假设**注释掉** `rewriteSaStrategy()` 那段(用 Sa-Token 默认的 `getAnnotation`)。你在接口上用自定义注解:
+
+```java
+@SaSpaceCheckPermission("picture:edit")   // 你想: 只有有 picture:edit 权限才能改图
+@PostMapping("/picture/edit")
+public BaseResponse<Boolean> editPicture(...) { ... }
+```
+
+请求进来,Sa-Token 拦截器要校验权限,去找方法上的 `@SaCheckPermission`:
+- 默认用 `method.getAnnotation(SaCheckPermission.class)` → **返回 null**(方法上直接标的是 `SaSpaceCheckPermission`,不是 `SaCheckPermission`)。
+- Sa-Token 以为这方法**没加权限注解** → **不校验,直接放行**。
+- 结果:**任何登录用户都能调 `/picture/edit`**,@SaSpaceCheckPermission 完全失效,权限被绕过。
+
+开启合并后:
+- `getMergedAnnotation(method, SaCheckPermission.class)` → 穿透 `SaSpaceCheckPermission`,找到它上面的元注解 `@SaCheckPermission(type=SPACE)`,并把 value("picture:edit") 合并进来 → Sa-Token 正确识别"需要 picture:edit 权限、SPACE 体系"→ **校验生效**。
+
+> 一句话:这配置是让 Sa-Token **能看懂你的自定义组合注解**。不开,`@SaSpaceCheckPermission` 就是摆设,接口裸奔。
+
+---
+
+### 问题3:`@AliasFor` 的作用?Spring 的包对吗?
+
+`@AliasFor` 来自 `org.springframework.core.annotation.AliasFor` —— **Spring 的包,完全正确**。Sa-Token 的组合注解就是按 Spring 注解体系设计的。
+
+作用:**属性别名 / 跨注解属性桥接**。
+
+```java
+@AliasFor(annotation = SaCheckPermission.class)
+String[] value() default {};
+```
+意思是:`SaSpaceCheckPermission.value` 这个属性,是**元注解 `SaCheckPermission.value` 的别名** —— 你在 `@SaSpaceCheckPermission(value="picture:edit")` 写的值,会**透传**给内部的 `@SaCheckPermission.value`。
+
+配合问题2 的 `getMergedAnnotation`,Spring 合并注解时会把三个属性都桥接过去:
+```
+SaSpaceCheckPermission.value   →  SaCheckPermission.value
+SaSpaceCheckPermission.mode    →  SaCheckPermission.mode
+SaSpaceCheckPermission.orRole  →  SaCheckPermission.orRole
+```
+
+而 `type` 不在 SaSpaceCheckPermission 里暴露 —— 它是在注解**类定义**上写死的(`@SaCheckPermission(type = StpKit.SPACE_TYPE)`),对使用者固定。
+
+> 如果没有 `@AliasFor`,你写的 `@SaSpaceCheckPermission("picture:edit")` 的 value **传不到** SaCheckPermission,合并出来 value 是空的,校验又会失效。所以 @AliasFor 是"属性管道",和 getMergedAnnotation 是一对搭档。
+
+`@AliasFor` 两种用法:
+- ① 同注解内互为别名:`@AliasFor("value")`(让两个属性互指)。
+- ② 跨注解(元注解)别名:`@AliasFor(annotation=X.class)`(这里用的,把属性映射到元注解)。
+
+---
+
+### 问题4:`@SaCheckPermission(type = ..., value = ...)` 的 type 和 value 意义
+
+`@SaCheckPermission` 是 Sa-Token 的权限校验注解,核心参数:
+
+| 参数 | 含义 | 例子 |
+|---|---|---|
+| **`type`** | **loginType,账号体系** —— 用哪套账号体系校验 | `type = StpKit.SPACE_TYPE` → 走 SPACE 体系 → 触发 `StpInterfaceImpl.getPermissionList(loginId, "space")`(就是之前逐行讲的那个方法!) |
+| **`value`** | **要校验的权限码** —— 检查用户权限列表里有没有它 | `value = "picture:edit"` |
+| `mode` | 多个 value 的逻辑 | AND=都要有,OR=有其一 |
+| `orRole` | 权限不过时的角色兜底 | `orRole = "admin"` |
+
+所以 `@SaCheckPermission(type = StpKit.SPACE_TYPE, value = "picture:edit")` 的完整意思:
+
+> **在 SPACE 账号体系下,校验当前用户是否拥有 `picture:edit` 权限。**
+
+执行流程:
+1. Sa-Token 按 `type=SPACE` → 调 `StpInterfaceImpl.getPermissionList(loginId, "space")` 拿到用户的权限码列表(比如 `[picture:view, picture:edit]`)。
+2. 检查列表里**是否含** value(`picture:edit`)→ 含则放行,不含则抛 `NotPermissionException` 拒绝。
+
+**为什么要指定 type?** 因为项目是多账号体系(默认 user 体系 + 自定义 space 体系)。Sa-Token 不知道你这次要用哪套校验,必须用 `type` 指明,才能路由到对应的 `StpInterfaceImpl` 逻辑。这正是注释里说的"每次都要指定 loginType 比较麻烦"——所以才封装了 `SaSpaceCheckPermission`,把 type 写死成 SPACE,使用者只写 value。
+
+---
+
+### 问题5:`SaSpaceCheckPermission` 逐行
+
+```java
+import cn.dev33.satoken.annotation.SaCheckPermission;   // Sa-Token 权限注解(被组合的元注解)
+import cn.dev33.satoken.annotation.SaMode;              // 校验模式枚举 AND/OR
+import com.zjcc.ccpicturebackend.manager.auth.StpKit;   // 项目自定义的多账号体系工具(定义了 SPACE_TYPE)
+import org.springframework.core.annotation.AliasFor;     // Spring 属性别名
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;   // RUNTIME: 运行时保留
+import java.lang.annotation.Target;
+
+@SaCheckPermission(type = StpKit.SPACE_TYPE)   // ① 元注解: 本注解"本质是一个 type=SPACE 的 SaCheckPermission", 把 type 写死
+@Retention(RetentionPolicy.RUNTIME)             // ② 注解保留到运行期(反射能读, 必须, 否则 Sa-Token 运行时读不到)
+@Target({ElementType.METHOD, ElementType.TYPE}) // ③ 可标在方法上, 也可标在类上(标类=该类所有方法生效)
+public @interface SaSpaceCheckPermission {
+
+    @AliasFor(annotation = SaCheckPermission.class)   // ④ 桥接: 这个 value → SaCheckPermission.value
+    String[] value() default {};                       //    需要校验的权限码, 如 {"picture:edit"}
+
+    @AliasFor(annotation = SaCheckPermission.class)   // ⑤ 桥接: mode → SaCheckPermission.mode
+    SaMode mode() default SaMode.AND;                  //    多权限码的 AND/OR, 默认 AND
+
+    @AliasFor(annotation = SaCheckPermission.class)   // ⑥ 桥接: orRole → SaCheckPermission.orRole
+    String[] orRole() default {};                      //    权限不过时的角色兜底(有指定角色也放行)
+}
+```
+
+逐点:
+- **① 元注解** `@SaCheckPermission(type = StpKit.SPACE_TYPE)`:标在**注解定义**上(不是方法上)。声明"SaSpaceCheckPermission = 一个 type 固定为 SPACE 的 SaCheckPermission"。这样使用者不用每次写 type。
+- **② `@Retention(RUNTIME)`**:注解生命周期到运行期。Sa-Token 是运行时反射读注解的,必须 RUNTIME(默认是 CLASS,反射读不到)。
+- **③ `@Target({METHOD, TYPE})`**:允许标在方法或类上。
+- **④⑤⑥ 三个属性**:都通过 `@AliasFor` 桥接到 SaCheckPermission 的同名属性,把使用者写的值透传过去。
+
+#### 整体设计意图(组合注解模式)
+
+这是个**组合注解**,目的是**简化 + 固化**:
+
+| 写法 | 字数 | 风险 |
+|---|---|---|
+| `@SaCheckPermission(type=StpKit.SPACE_TYPE, value="picture:edit")` | 啰嗦,每次写 type | 容易忘写/写错 type |
+| `@SaSpaceCheckPermission("picture:edit")` | 简洁 | type 已固化,不会错 |
+
+**三个东西是一套配合**:
+1. `SaSpaceCheckPermission` —— 组合注解,固化 type=SPACE,只暴露 value。
+2. `@AliasFor` —— 把 value/mode/orRole 桥接给内部的 SaCheckPermission。
+3. `SaTokenConfigure` 的 `getMergedAnnotation` —— 让 Sa-Token 能穿透组合注解识别出 SaCheckPermission。
+
+缺任何一环,`@SaSpaceCheckPermission` 都不工作(要么属性传不过去,要么 Sa-Token 根本不认它)。
+
+---
+
+**一句话串起来:**
+> `/**` 拦全部请求 → `SaInterceptor` 拦截 → 遇到方法上的 `@SaSpaceCheckPermission` → `getMergedAnnotation`(必须配,否则不认组合注解)穿透找到元注解 `@SaCheckPermission(type=SPACE)` + `@AliasFor` 透传的 value → Sa-Token 在 SPACE 体系下调 `getPermissionList` 拿权限列表 → 查含不含 value → 放行/拒绝。
+
+---
+
+## 为什么非要自定义一个SaSpaceCheckPermission，直接用SaCheckPermission 不行吗？弊端在哪？就是每次用注解多写一个type？
+**直接用 `SaCheckPermission` 技术上完全可行**,自定义 `SaSpaceCheckPermission` 是工程优化,不是必需。但弊端不只是"多写一个 type",最关键的其实是**容易忘写 type 而出 bug**。
+
+### 直接用完全可行
+
+```java
+// 这样写功能完全正常(甚至不需要 SaTokenConfigure 的合并配置, 因为是直接标注)
+@SaCheckPermission(type = StpKit.SPACE_TYPE, value = "picture:edit")
+@PostMapping("/picture/edit")
+public BaseResponse<Boolean> editPicture(...) { ... }
+```
+
+Sa-Token 原生就支持 `type + value`,直接标注,拦截器用默认 `getAnnotation` 就能找到。所以自定义注解不是"非用不可"。
+
+### 直接用的弊端(按严重程度)
+
+#### ① 啰嗦(表面弊端)
+每个空间权限接口都要写 `type = StpKit.SPACE_TYPE`,几十个接口就是几十次重复。
+
+#### ② 容易忘写 / 写错 type(关键弊端,不是麻烦是 bug)⚠️
+这才是核心。`type` 是个**样板代码**,写多了就容易漏。一旦某天某个接口写成:
+```java
+@SaCheckPermission(value = "picture:edit")   // ← 忘了 type!
+```
+后果:type 取默认值(`""`)→ Sa-Token 走**默认账号体系**校验 → 调 `getPermissionList(loginId, 默认type)` → 你的 `StpInterfaceImpl` 第 68 行 `!SPACE_TYPE.equals(loginType)` 命中 → **返回空列表** → 权限校验认为"没有 picture:edit 权限" → **正常用户也被拒,接口用不了**(或反之,取决于默认体系配置,总之偏离预期)。
+
+> 也就是说:你设计的那整套空间权限逻辑(公共图库/私有/团队/角色判断)**根本没执行**,因为体系走错了。这是个隐蔽 bug,不是简单的"多打几个字"。
+
+#### ③ 语义不够直观
+`@SaCheckPermission(type = StpKit.SPACE_TYPE, ...)` 要看完才知道是"空间权限";`@SaSpaceCheckPermission(...)` 名字直接表达语义。
+
+#### ④ 改动不统一
+万一 `SPACE_TYPE` 的值要变(或想给所有空间权限统一加个默认 `orRole`),直接用要改 N 个接口;自定义注解改 1 处。
+
+### 自定义的代价(没有银弹)
+
+| 收益 | 代价 |
+|---|---|
+| 少写 type、防忘写、语义清晰、统一改动 | 多一个类 + `SaTokenConfigure` 合并配置 + `@AliasFor` 桥接 + 新手理解成本(你这几问就是成本) |
+
+封装本身引入了**组合注解的复杂性**(必须配 `getMergedAnnotation`,否则失效)。如果空间权限接口只有三五个,直接用反而更简单、更不容易踩坑。
+
+### 结论:是权衡,不是必须
+
+> - **接口少**(就几个空间权限):直接用 `@SaCheckPermission(type=..., value=...)` 更省事,连合并配置都不用搞。
+> - **接口多 + 团队协作**(几十个空间权限接口):自定义 `@SaSpaceCheckPermission` 划算 —— 省重复、防忘写 type、统一可控。封装的一次性成本被几十次使用摊薄。
+
+---
+
+## 所有空间权限统一加个默认 orRole，代码咋么实现
+就在 `SaSpaceCheckPermission` 里把 `orRole` 的默认值改掉,改一处所有接口生效:
+
+### ① 改默认值(一行)
+
+```java
+// SaSpaceCheckPermission.java
+@AliasFor(annotation = SaCheckPermission.class)
+String[] orRole() default {"admin"};   // ← 原来是 {} , 现在默认 admin 角色兜底
+```
+
+这样所有标了 `@SaSpaceCheckPermission(...)` 的接口,默认都带 `orRole={"admin"}`,不用每个接口单独写。
+
+### ⚠️ ② 关键前提:orRole 依赖 getRoleList,你项目现在是空的
+
+这是最大的坑。`orRole` 校验的是**角色**,Sa-Token 会调 `StpInterfaceImpl.getRoleList()` 拿用户的角色列表去匹配。但你项目里这个方法**直接返回空**:
+
+```java
+// StpInterfaceImpl.java :164-167
+@Override
+public List<String> getRoleList(Object loginId, String loginType) {
+    return new ArrayList<>();   // 本项目中不使用。永远空
+}
+```
+
+→ 任何人的角色列表都是空 → `orRole="admin"` 永远匹配不上 → **默认值设了也不生效**。
+
+要让 orRole 真正起作用,必须实现 `getRoleList`,把用户的角色返回出来(比如系统管理员返回 "admin"):
+
+```java
+@Override
+public List<String> getRoleList(Object loginId, String loginType) {
+    if (!StpKit.SPACE_TYPE.equals(loginType)) {
+        return new ArrayList<>();
+    }
+    User loginUser = (User) StpKit.SPACE.getSessionByLoginId(loginId).get(USER_LOGIN_STATE);
+    if (loginUser == null) {
+        return new ArrayList<>();
+    }
+    // 系统管理员返回 admin 角色, 匹配 orRole="admin"
+    if (userService.isAdmin(loginUser)) {
+        return Collections.singletonList("admin");
+    }
+    return new ArrayList<>();
+}
+```
+
+### ③ 单个接口想覆盖默认值
+
+默认是 `{"admin"}`,某个接口想要别的兜底(或不兜底),直接传参覆盖:
+
+```java
+@SaSpaceCheckPermission(value = "picture:view", orRole = "viewer")  // 覆盖成 viewer
+@SaSpaceCheckPermission(value = "picture:view", orRole = {})        // 该接口不要兜底
+```
+
+### ④ 校验流程(value 先查,orRole 兜底)
+
+Sa-Token 遇到 `@SaSpaceCheckPermission(value="picture:edit", orRole="admin")`(type=SPACE):
+
+```
+1. 查权限: getPermissionList(loginId, "space") 返回的权限码 含不含 "picture:edit"?
+   含 → 放行 ✅
+   不含 ↓
+2. 查角色(兜底): getRoleList(loginId, "space") 返回的角色 含不含 "admin"?
+   含 → 放行 ✅
+   不含 → 抛 NotPermissionException 拒绝 ❌
+```
+
+### ⑤ 这正好解决之前"系统管理员被拒"的边界问题
+
+还记得第⑥段 `loginSpaceUser == null` 时系统管理员被拒吗?有了这套:
+- 默认 `orRole="admin"` + `getRoleList` 给系统管理员返回 "admin"
+- 系统管理员即使不是某 team 空间成员(权限码不匹配),**第②步角色兜底也能放行** → 不用再在每个分支补 `if (userService.isAdmin) return ADMIN_PERMISSIONS` 了,orRole 统一兜底。
+
+---
+
+**一句话:改 `orRole() default {"admin"}` 一行即可统一默认;但必须同时实现 `getRoleList` 返回 admin 角色,否则 orRole 是空设。配好后,系统管理员凭 admin 角色全局兜底放行,连之前 StpInterfaceImpl 里那些 `isAdmin` 判断都能省掉一部分。**
