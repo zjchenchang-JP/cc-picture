@@ -31,6 +31,7 @@ public class SpaceUserAuthManager {
     public static final SpaceUserAuthConfig SPACE_USER_AUTH_CONFIG;
 
     static {
+        // 加载配置文件到对象
         String json = ResourceUtil.readUtf8Str("biz/spaceUserAuthConfig.json");
         SPACE_USER_AUTH_CONFIG = JSONUtil.toBean(json, SpaceUserAuthConfig.class);
     }

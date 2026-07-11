@@ -4,6 +4,9 @@ import lombok.Data;
 
 import java.io.Serializable;
 
+/**
+ * 空间成员权限
+ */
 @Data
 public class SpaceUserPermission implements Serializable {
 
