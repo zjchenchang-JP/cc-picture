@@ -6,7 +6,7 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.zjcc.ccpicturebackend.annotation.AuthCheck;
+import com.zjcc.ccpicturebackend.manager.auth.annotation.AuthCheck;
 import com.zjcc.ccpicturebackend.api.aliyunai.AliYunAiApi;
 import com.zjcc.ccpicturebackend.api.aliyunai.model.CreateOutPaintingTaskResponse;
 import com.zjcc.ccpicturebackend.api.aliyunai.model.GetOutPaintingTaskResponse;

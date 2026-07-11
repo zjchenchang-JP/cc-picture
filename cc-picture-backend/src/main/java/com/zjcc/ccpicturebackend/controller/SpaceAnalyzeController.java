@@ -1,6 +1,6 @@
 package com.zjcc.ccpicturebackend.controller;
 
-import com.zjcc.ccpicturebackend.annotation.AuthCheck;
+import com.zjcc.ccpicturebackend.manager.auth.annotation.AuthCheck;
 import com.zjcc.ccpicturebackend.common.BaseResponse;
 import com.zjcc.ccpicturebackend.common.ResultUtils;
 import com.zjcc.ccpicturebackend.constant.UserConstant;

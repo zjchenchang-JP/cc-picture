@@ -1,6 +1,6 @@
 package com.zjcc.ccpicturebackend.aop;
 
-import com.zjcc.ccpicturebackend.annotation.AuthCheck;
+import com.zjcc.ccpicturebackend.manager.auth.annotation.AuthCheck;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.model.entity.User;
@@ -15,7 +15,6 @@ import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
 import javax.annotation.Resource;
-import javax.servlet.ServletRequest;
 import javax.servlet.http.HttpServletRequest;
 
 /**

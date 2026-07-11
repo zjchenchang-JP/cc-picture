@@ -1,4 +1,4 @@
-package com.zjcc.ccpicturebackend.annotation;
+package com.zjcc.ccpicturebackend.manager.auth.annotation;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

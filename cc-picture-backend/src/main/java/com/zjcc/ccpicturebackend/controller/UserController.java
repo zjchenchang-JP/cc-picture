@@ -1,7 +1,7 @@
 package com.zjcc.ccpicturebackend.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.zjcc.ccpicturebackend.annotation.AuthCheck;
+import com.zjcc.ccpicturebackend.manager.auth.annotation.AuthCheck;
 import com.zjcc.ccpicturebackend.common.BaseResponse;
 import com.zjcc.ccpicturebackend.common.DeleteRequest;
 import com.zjcc.ccpicturebackend.common.ResultUtils;

@@ -91,7 +91,8 @@ public class StpInterfaceImpl implements StpInterface {
             return spaceUserAuthManager.getPermissionsByRole(spaceUser.getSpaceRole());
         }
         // 如果有 spaceUserId，必然是团队空间，通过数据库查询 SpaceUser 对象
-        // spaceUserId 来自 /spaceUser/* 路径(见 getAuthContextByRequest 的 197-199 行,moduleName=spaceUser → setSpaceUserId(id))。对应 SpaceUserController 里针对「某条成员记录」的操作:
+        // spaceUserId 来自 /spaceUser/* 路径
+        // (见 getAuthContextByRequest 的 197-199 行,moduleName=spaceUser → setSpaceUserId(id))。对应 SpaceUserController 里针对「某条成员记录」的操作:
         // POST /spaceUser/edit(编辑某成员的角色)
         // POST /spaceUser/delete(移除某成员)
         // 查某个成员信息
@@ -114,7 +115,7 @@ public class StpInterfaceImpl implements StpInterface {
                 if (userService.isAdmin(loginUser)) {
                     return ADMIN_PERMISSIONS; // 系统管理员 → 放行
                 }
-                // 这里不判断isAdmin 直接返回，会导致系统管理员在私有空间没有权限
+                // 如果不判断isAdmin 直接返回，会导致系统管理员在私有空间没有权限
                 return new ArrayList<>();
             }
             return spaceUserAuthManager.getPermissionsByRole(loginSpaceUser.getSpaceRole());
