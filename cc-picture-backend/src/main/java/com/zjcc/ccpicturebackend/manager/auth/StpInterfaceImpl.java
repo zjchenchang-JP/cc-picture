@@ -164,7 +164,7 @@ public class StpInterfaceImpl implements StpInterface {
         } else {
             // 团队空间, 查询 SpaceUser 并获取角色和权限
             spaceUser = spaceUserService.lambdaQuery()
-                    .eq(SpaceUser::getId, userId)
+                    .eq(SpaceUser::getUserId, userId)
                     .eq(SpaceUser::getSpaceId, spaceId)
                     .one();
             if (spaceUser == null) {
