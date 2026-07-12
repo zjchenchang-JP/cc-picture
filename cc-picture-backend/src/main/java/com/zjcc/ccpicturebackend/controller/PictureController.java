@@ -6,6 +6,7 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.zjcc.ccpicturebackend.manager.auth.SpaceUserAuthManager;
 import com.zjcc.ccpicturebackend.manager.auth.StpKit;
 import com.zjcc.ccpicturebackend.manager.auth.annotation.AuthCheck;
 import com.zjcc.ccpicturebackend.api.aliyunai.AliYunAiApi;
@@ -34,6 +35,7 @@ import com.zjcc.ccpicturebackend.service.PictureService;
 import com.zjcc.ccpicturebackend.service.SpaceService;
 import com.zjcc.ccpicturebackend.service.UserService;
 import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.util.DigestUtils;
@@ -78,6 +80,8 @@ public class PictureController {
                     // 缓存 5 分钟移除
                     .expireAfterWrite(5L, TimeUnit.MINUTES)
                     .build();
+    @Autowired
+    private SpaceUserAuthManager spaceUserAuthManager;
 
 
     /**
@@ -182,6 +186,7 @@ public class PictureController {
         // 空间权限校验
         // 如果查询出的图片有 spaceId(非公共图库)，则运用跟删除图片一样的校验逻辑，仅空间管理员可以查看
         Long spaceId = picture.getSpaceId();
+        Space space = null;
         if (spaceId != null) {
             // v1.0 Sa-token之前的校验
             // User loginUser = userService.getLoginUser(request);
@@ -192,9 +197,18 @@ public class PictureController {
             // 针对未登录也可以调用的接口，需要改为编程式权限校验
             boolean hasPermission = StpKit.SPACE.hasPermission(SpaceUserPermissionConstant.PICTURE_VIEW);
             ThrowUtils.throwIf(!hasPermission, ErrorCode.NO_AUTH_ERROR);
+            space = spaceService.getById(spaceId);
+            ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
         }
+        // 获取权限列表
+        // 即使空间 id 不存在（公共图库）也要获取权限列表，管理员会获取到全部权限，这样前端才能顺利展示出操作按钮
+        User loginUser = userService.getLoginUser(request);
+        List<String> permissionList = spaceUserAuthManager.getPermissionList(space, loginUser);
+        PictureVO pictureVO = pictureService.getPictureVO(picture, request);
+        pictureVO.setPermissionList(permissionList);
+
         // 获取封装类
-        return ResultUtils.success(pictureService.getPictureVO(picture, request));
+        return ResultUtils.success(pictureVO);
     }
 
     /**

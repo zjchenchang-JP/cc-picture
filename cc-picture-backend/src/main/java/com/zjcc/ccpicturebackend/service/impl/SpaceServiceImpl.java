@@ -10,6 +10,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
 import com.zjcc.ccpicturebackend.exception.ErrorCode;
 import com.zjcc.ccpicturebackend.exception.ThrowUtils;
+import com.zjcc.ccpicturebackend.manager.auth.SpaceUserAuthManager;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceAddRequest;
 import com.zjcc.ccpicturebackend.model.dto.space.SpaceQueryRequest;
 import com.zjcc.ccpicturebackend.model.entity.Space;
@@ -55,6 +56,8 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
     @Lazy //解决循环依赖
     @Resource
     private SpaceUserService spaceUserService;
+    @Resource
+    private SpaceUserAuthManager spaceUserAuthManager;
 
     @Override
     public long addSpace(SpaceAddRequest spaceAddRequest, User loginUser) {
@@ -147,6 +150,10 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
     public SpaceVO getSpaceVO(Space space, HttpServletRequest request) {
         // 对象转封装类
         SpaceVO spaceVO = SpaceVO.objToVo(space);
+        // 通过Sa-token 获取权限列表
+        User loginUser = userService.getLoginUser(request);
+        List<String> permissionList = spaceUserAuthManager.getPermissionList(space, loginUser);
+        spaceVO.setPermissionList(permissionList);
         // 查询关联用户信息
         Long userId = space.getUserId();
         if (userId != null && userId > 0) {

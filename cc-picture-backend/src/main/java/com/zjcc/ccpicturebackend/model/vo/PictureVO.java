@@ -6,6 +6,7 @@ import lombok.Data;
 import org.springframework.beans.BeanUtils;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 
@@ -111,8 +112,15 @@ public class PictureVO implements Serializable {
      */
     private String picColor;
 
+    /**
+     * 引入Sa-Token框架后
+     * 新增 权限列表 属性
+     * 前端也需要根据用户的权限来进行一些页面内容的展示和隐藏
+     * 后端需要将用户具有的权限返回给前端，这样就不用让前端编写复杂的角色和权限校验逻辑
+     */
+    private List<String> permissionList = new ArrayList<>();
 
-    private static final long serialVersionUID = 1L;  
+    private static final long serialVersionUID = 1L;
   
     /**  
      * 封装类转对象  
