@@ -13,6 +13,7 @@ import com.zjcc.ccpicturebackend.model.enums.SpaceRoleEnum;
 import com.zjcc.ccpicturebackend.model.enums.SpaceTypeEnum;
 import com.zjcc.ccpicturebackend.service.SpaceUserService;
 import com.zjcc.ccpicturebackend.service.UserService;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
@@ -27,7 +28,7 @@ import java.util.List;
  */
 @Component
 public class SpaceUserAuthManager {
-
+    @Lazy
     @Resource
     private SpaceUserService spaceUserService;
 

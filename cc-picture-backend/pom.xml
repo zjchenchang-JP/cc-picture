@@ -117,6 +117,22 @@
             <artifactId>commons-pool2</artifactId>
         </dependency>
 
+        <!-- 分库分表 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-jdbc-core-spring-boot-starter</artifactId>
+            <version>5.2.0</version>
+            <exclusions>
+                <!-- 5.2.0 的 release pom 误留了对内部测试模块 shardingsphere-test-common(test scope)的依赖,
+                     该模块从未发布到任何公共仓库(中央仓库/阿里云均 404),会导致依赖解析中断并写入 .lastUpdated
+                     失败缓存,表现为 IDE 始终无法解析。exclusion 会沿依赖树传播,一次切断全部 17 处引用;
+                     且 test scope 不参与编译,排除不影响分库分表功能。 -->
+                <exclusion>
+                    <groupId>org.apache.shardingsphere</groupId>
+                    <artifactId>shardingsphere-test-common</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
 
 
 

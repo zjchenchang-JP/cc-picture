@@ -24,6 +24,33 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     username: root
     password: 123456
+  # 空间图片分表
+  shardingsphere:
+    datasource:
+      names: cc_picture
+      cc_picture:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: com.mysql.cj.jdbc.Driver
+        url: jdbc:mysql://localhost:3306/cc_picture
+        username: root
+        password: 123456
+    rules:
+      sharding:
+        tables:
+          picture:
+            actual-data-nodes: cc_picture.picture # 动态分表 逻辑表
+            table-strategy:
+              standard:
+                sharding-column: spaceId # 分表键
+                sharding-algorithm-name: picture_sharding_algorithm  # 使用自定义分片算法
+        sharding-algorithms:
+          picture_sharding_algorithm:
+            type: CLASS_BASED
+            props:
+              strategy: standard
+              algorithmClassName: com.zjcc.ccpicturebackend.manager.sharding.PictureShardingAlgorithm
+    props:
+      sql-show: true
   # redis配置
   redis:
     database: 0
