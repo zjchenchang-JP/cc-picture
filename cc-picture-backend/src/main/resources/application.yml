@@ -86,6 +86,7 @@ mybatis-plus:
     map-underscore-to-camel-case: false # 关闭 [MP查询数据库时 将驼峰命名自动转换为下划线]
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl # 开启SQL日志打印到控制台
   global-config: #全局配置
+    enable-sql-runner: true # SqlRunner 配合 DynamicShardingManager 动态创建分表
     db-config:
       logic-delete-field: isDelete # 全局逻辑删除字段名(isDelete 为实体类属性名称)
       logic-delete-value: 1 # 逻辑已删除值。可选，默认值为 1
