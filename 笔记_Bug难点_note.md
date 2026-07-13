@@ -1606,3 +1606,218 @@ if (spaceId == null) {  // 公共图库
 
 换个说法:它像停车场入口的"业主识别" —— 你只是路过(无资源/查询),它不拦你(放行);但你要进某个具体车位(带 id 的写操作),它就仔细查你是不是这车位的业主。而你到底能不能开车、能不能进大楼,是别的保安(登录/@AuthCheck)管的。
 
+---
+
+# 2026/07/12
+
+## @SaSpaceCheckPermission 注解生效全过程(以 uploadPicture 为例)
+
+### 场景设定
+
+```java
+// PictureController
+@PostMapping("/upload")
+@SaSpaceCheckPermission(value = SpaceUserPermissionConstant.PICTURE_UPLOAD)  // = "picture:upload"
+public BaseResponse<PictureVO> uploadPicture(@RequestPart("file") MultipartFile multipartFile, ...) { ... }
+```
+
+请求 `POST /api/picture/upload`,带 file + 可选 spaceId,已登录。
+
+### 涉及的自定义组件
+
+`SaTokenConfigure`(拦截器 + 注解合并)· `SaInterceptor` · `AnnotatedElementUtils.getMergedAnnotation` · `SaSpaceCheckPermission`(`@AliasFor`)· `SaCheckPermission` · `StpKit.SPACE_TYPE` · `StpInterfaceImpl.getPermissionList` · `SpaceUserAuthManager` · `spaceUserAuthConfig.json` · `SpaceUserAuthContext` · `SpaceTypeEnum`
+
+### 完整流程(6 阶段时间线)
+
+**阶段〇:启动期(一次性准备)**
+1. `SaTokenConfigure.addInterceptors` → 注册 `new SaInterceptor()` 拦 `/**`(所有请求)。
+2. `SaTokenConfigure.rewriteSaStrategy`(`@PostConstruct`)→ 把 `SaAnnotationStrategy.instance.getAnnotation` 改成 `AnnotatedElementUtils.getMergedAnnotation`(开注解合并,否则不认识组合注解)。
+3. `SpaceUserAuthManager` 的 `static` 块 → 加载 `spaceUserAuthConfig.json` 进 `SPACE_USER_AUTH_CONFIG` 常量。
+
+**阶段一:请求拦截**
+4. 请求到 → `SaInterceptor.preHandle` 拦截(`/**` 命中)→ 扫描 `uploadPicture` 方法上的注解。
+
+**阶段二:注解解析(组合注解穿透)**
+5. `getMergedAnnotation(uploadPicture方法, SaCheckPermission.class)`:
+   - 方法直接标的是 `@SaSpaceCheckPermission(value=PICTURE_UPLOAD)`。
+   - **穿透**到 `SaSpaceCheckPermission` 类上的元注解 `@SaCheckPermission(type=StpKit.SPACE_TYPE)`,拿到 `type="space"`。
+   - 通过 `@AliasFor(annotation=SaCheckPermission.class)` 把 `value`("picture:upload")、`mode`、`orRole` 桥接进来。
+6. 合并出一个"虚拟的" `@SaCheckPermission(type="space", value="picture:upload")`。
+
+**阶段三:触发权限校验**
+7. Sa-Token 按这个注解要校验"SPACE 体系下有无 picture:upload"→ `StpKit.SPACE.getPermissionList(loginId)` → 路由到 `StpInterfaceImpl.getPermissionList(loginId, "space")`。
+
+**阶段四:getPermissionList 内部(逐方法调用)**
+8. `:70` 校验 `loginType=="space"` ✅。
+9. `:75` 算 `ADMIN_PERMISSIONS` = `SpaceUserAuthManager.getPermissionsByRole("admin")`(从 json 取 admin 全部权限码)。
+10. `:77` `getAuthContextByRequest()` 解析当前请求 → `authContext`(从 body/参数取 spaceId;上传不传通用 id,不做路径翻译)。
+11. `:79` `isAllFieldsNull(authContext)` 分叉:
+    - **没传 spaceId(传到公共图库)** → 全空 → `return ADMIN_PERMISSIONS`(放行)。
+    - **传了 spaceId** → 继续。
+12. `:83` 取 `loginUser`、`userId`(从 Sa-Token session)。
+13. `:89/:100` 无 spaceUser 对象、无 spaceUserId → 跳过。
+14. `:124` 有 spaceId → 跳过 pictureId 反查。
+15. `:152` `spaceService.getById(spaceId)` → `Space`。
+16. `:157` 按 `spaceType`:
+    - **私有**:本人或系统管理员 → `ADMIN_PERMISSIONS`;否则空。
+    - **团队**:查 `SpaceUser`(当前用户在该空间的成员记录)→ `getPermissionsByRole(角色)` 返回该角色权限码。
+
+**阶段五:Sa-Token 匹配**
+17. `getPermissionList` 返回的权限码列表交回 Sa-Token。
+18. Sa-Token 检查列表**含不含 "picture:upload"**(内部 `hasPermission = contains`):
+    - 含 → 校验通过。
+    - 不含 → 抛 `NotPermissionException` → 全局异常 → 返回"无权限"。
+
+**阶段六:方法执行**
+19. 校验通过 → `SaInterceptor` 放行 → `uploadPicture` 方法体真正执行。
+
+### 调用链总图
+
+```
+请求 /api/picture/upload
+  │
+  ▼
+SaInterceptor.preHandle  ──(SaTokenConfigure 注册, 拦 /**)
+  │
+  ▼ 找注解
+AnnotatedElementUtils.getMergedAnnotation  ──(SaTokenConfigure 改写, 穿透组合注解)
+  │   穿透 @SaSpaceCheckPermission + @AliasFor 桥接
+  ▼
+得到 @SaCheckPermission(type=SPACE, value="picture:upload")
+  │
+  ▼ 按 type 路由
+StpInterfaceImpl.getPermissionList(loginId, "space")
+  │   ├─ SpaceUserAuthManager.getPermissionsByRole(角色)  ──查 spaceUserAuthConfig.json
+  │   ├─ getAuthContextByRequest()  ──解析出 spaceId/pictureId
+  │   ├─ isAllFieldsNull? 全空→放行
+  │   └─ spaceService/spaceUserService 查库 → 按公共/私有/团队判断
+  ▼
+返回权限码列表
+  │
+  ▼ Sa-Token 匹配
+列表含 "picture:upload" ?  ──是→放行进 uploadPicture; 否→抛 NotPermissionException
+```
+
+### 三个具体场景
+
+| 场景 | 走到的分支 | 返回的权限码 | 含 picture:upload? | 结果 |
+|---|---|---|---|---|
+| 公共图库上传(不传 spaceId) | `:79` 全空放行 | ADMIN_PERMISSIONS | ✅ | 放行(所有登录用户可传) |
+| 团队空间上传(用户是 editor) | `:166` 团队,editor | `[view,upload,edit,delete]` | ✅ | 放行 |
+| 团队空间上传(用户是 viewer) | `:166` 团队,viewer | `[view]` | ❌ | 拒绝(viewer 不能传) |
+| 别人私有空间上传 | `:157` 私有,非本人 | `[]` 空 | ❌ | 拒绝 |
+
+### ⚠️ 附带 bug
+
+`:167` 写的是 `.eq(SpaceUser::getId, userId)`,应为 `.eq(SpaceUser::getUserId, userId)`。`getId()` 是成员记录主键、`getUserId()` 才是用户 id,当前写法几乎查不到记录 → `spaceUser==null` → 返回空 → **团队空间上传会被误拒**(即便你是 editor),需修。
+
+> **一句话:请求 → SaInterceptor 拦 → getMergedAnnotation 把 `@SaSpaceCheckPermission` 穿透合并成 `@SaCheckPermission(type=SPACE, value=...)` → 按 type 调 `StpInterfaceImpl.getPermissionList` → 解析请求拿 spaceId → 查库判断公共/私有/团队 → 用 `SpaceUserAuthManager`(读 json)把角色转权限码 → Sa-Token 检查列表含不含 value → 含放行、不含拒绝。注解定义、拦截器配置、权限加载、json 配置四块各司其职、缺一不可。**
+
+---
+
+## Sa-Token 内部匹配机制 + 权限定义的替代方案
+
+### 一、"检查含不含 value" 是 Sa-Token 内部源码做的
+
+分工:**你实现 `getPermissionList`(提供数据),Sa-Token 内部做匹配判断。** 核心源码(`StpLogic`,简化):
+
+```java
+public boolean hasPermission(String permission) {
+    return getPermissionList(loginId).contains(permission);   // ← 就是个 contains
+}
+public void checkPermission(String permission) {
+    if (!hasPermission(permission)) {
+        throw new NotPermissionException(permission, loginType);  // 不含 → 抛异常
+    }
+}
+```
+
+注解处理在 `SaAnnotationStrategy`:发现 `@SaCheckPermission(type, value, mode, orRole)` → 按 type 拿对应 `StpLogic` → 根据 mode 调 `checkPermissionAnd`(每个都要) / `checkPermissionOr`(至少一个)→ 权限不过再看 `orRole`(调 `getRoleList`)→ 都不过抛 `NotPermissionException`。
+
+所以"列表含不含 picture:upload" = Sa-Token 内部 `getPermissionList().contains("picture:upload")`,**完全是 Sa-Token 源码干的,你只管 `getPermissionList` 返回什么**。
+
+### 二、核心认知:Sa-Token 通过 StpInterface 解耦权限数据来源
+
+Sa-Token 只调你的 `getPermissionList` 拿列表,**不关心列表从哪来**。换方案只改 `getPermissionList` 内部,注解、拦截器、匹配逻辑一行不动。
+
+### 三、不用 json 的 5 种替代方案
+
+| 方案 | 权限存哪 | 改权限是否重启 | 动态管理 | 复杂度 | 适合 |
+|---|---|---|---|---|---|
+| A. JSON 文件 | json | 要重启 | ❌ | 低 | 固定规则(当前) |
+| B. 代码硬编码 | 代码 | 要重新部署 | ❌ | 最低 | 极简/学习 |
+| C. 数据库 RBAC 三表 | DB | 不用 | ✅ 后台改 | 中 | 企业级、运营管理 |
+| D. Redis | Redis | 不用 | ✅ 刷缓存 | 中 | 高性能 |
+| E. 配置中心(Nacos) | Nacos | 不用 | ✅ 热更 | 中高 | 微服务 |
+
+**B 硬编码示例**(最简单的替代):
+```java
+@Override
+public List<String> getPermissionList(Object loginId, String loginType) {
+    String role = ... // 拿到用户角色
+    switch (role) {
+        case "viewer": return Collections.singletonList("picture:view");
+        case "editor": return Arrays.asList("picture:view","picture:upload","picture:edit","picture:delete");
+        case "admin":  return Arrays.asList("spaceUser:manage","picture:view","picture:upload","picture:edit","picture:delete");
+        default: return new ArrayList<>();
+    }
+}
+```
+
+**C 数据库 RBAC 三表**(企业级标准):建 `role`、`permission`、`role_permission` 三表,`getPermissionList` 查 `userId → 角色 → 权限码`,管理后台改权限立即生效。
+
+### 选型
+
+- 权限固定(学习阶段):**A json** 或 **B 硬编码**。
+- 要做"后台动态配权限":**C 数据库三表**(RBAC 正路,面试常考)。
+- 高并发/不重启:**C + D**(库持久 + Redis 缓存)。
+- 微服务:**C/D + E**。
+
+> **一句话:"匹配 value"是 Sa-Token 内部 `getPermissionList().contains(value)` 干的,你不用写;正因为 Sa-Token 只通过 `StpInterface` 拿列表、不问来源,权限定义可随便换 —— json、代码、数据库、Redis、配置中心都行,只改 `getPermissionList` 内部。现在用 json 是因为权限固定;真要后台动态配权限,换数据库三表,注解和拦截器一行都不用动。**
+
+---
+
+## 项目启动报 "Command line is too long"(引入 ShardingSphere 后触发)
+
+### 现象
+
+IDEA 点运行 `CcPictureBackendApplication`,弹窗报错、起不来:
+
+```
+Error running 'CcPictureBackendApplication'. Command line is too long.
+Shorten the command line and rerun.
+```
+
+### 根因:Windows 命令行长度上限 + IDEA 拼接 classpath
+
+Windows 命令行长度上限约 **32KB**。IDEA 启动 Java 应用时,会把**所有依赖 jar 的绝对路径**拼到 `java -cp ...` 命令行里。引入 ShardingSphere 后传递依赖暴增(100+ 个 jar),classpath 拼起来超过 32KB → 启动命令被系统直接拒绝。
+
+> 关键认知:这是 **IDEA 启动配置 + Windows 限制** 的问题,**不是代码 / 依赖错误**——`mvn compile`、依赖解析全都正常,只有 IDEA 点「运行」才报。
+
+### 解决:改「缩短命令行」
+
+1. **Run → Edit Configurations…**
+2. 选中 **CcPictureBackendApplication**
+3. 右侧找 **Shorten command line**(中文版「缩短命令行」;新版 IDEA 把它折叠了,点 **Modify options / 修改选项** → 勾选 **Shorten command line** 让它显示出来)
+4. 从 `none` 改成 **JAR manifest**(中文「JAR 清单」)
+5. **Apply → OK** → 重新运行
+
+| 选项 | 原理 |
+|---|---|
+| **JAR manifest**(推荐) | IDEA 生成一个临时 jar,把超长 classpath 写进它的 `MANIFEST.MF`,再用 `java -jar` 启动,绕开命令行长度限制 |
+| classpath file | 把 classpath 写进临时文件,用 `java -cp @argfile` 启动 |
+
+> 没有 `JAR manifest` 选项的旧版 IDEA,选 `classpath file` 也行,原理类似(都是把 classpath 从命令行挪到文件里)。
+
+### 一劳永逸:设为默认
+
+**Edit Configurations → Edit configuration templates… → Application → Shorten command line = JAR manifest**。以后所有新建的 Application 运行配置都默认用这种方式,不用每个配置再改一遍。
+
+### 经验教训
+
+1. **一引入大量依赖(ShardingSphere、Spring Cloud 全家桶等)就报 "command line is too long"** → 第一反应去改 Shorten command line,**别去查代码或依赖**,因为编译和依赖解析本身是好的。
+2. **Windows 限定问题**:Linux / macOS 命令行上限远高于 32KB,所以可能出现"同事(Mac)能跑、我(Win)不能跑",本质是系统差异,不是代码问题。
+3. **配了就忘**:直接在 template 里设默认,免得每新建一个运行配置都踩一遍这个坑。
+
+> **一句话:jar 太多 → IDEA 拼的 `java -cp` 命令行超过 Windows 32KB 上限 → 去 Edit Configurations 把 Shorten command line 改成 JAR manifest,用临时 jar 承载 classpath 绕过限制,项目就能起来了。**
+
