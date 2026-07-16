@@ -98,6 +98,8 @@ public class WsHandshakeInterceptor implements HandshakeInterceptor {
     }
 
     @Override
-    public void afterHandshake(@NotNull ServerHttpRequest request, @NotNull ServerHttpResponse response, @NotNull WebSocketHandler wsHandler, Exception exception) {
+    public void afterHandshake(@NotNull ServerHttpRequest request,
+                               @NotNull ServerHttpResponse response,
+                               @NotNull WebSocketHandler wsHandler, Exception exception) {
     }
 }
