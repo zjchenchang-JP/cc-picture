@@ -9,6 +9,7 @@ import com.zjcc.ccpicturebackend.manager.websocket.model.PictureEditResponseMess
 import com.zjcc.ccpicturebackend.model.entity.User;
 import com.zjcc.ccpicturebackend.service.UserService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -23,6 +24,7 @@ import javax.annotation.Resource;
 public class PictureEditEventWorkHandler implements WorkHandler<PictureEditEvent> {
 
     @Resource
+    @Lazy
     private PictureEditHandler pictureEditHandler;
     @Resource
     private UserService userService;
