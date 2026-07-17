@@ -5,6 +5,7 @@ import cn.hutool.json.JSONUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
+import com.zjcc.ccpicturebackend.manager.websocket.disruptor.PictureEditEventProducer;
 import com.zjcc.ccpicturebackend.manager.websocket.model.PictureEditActionEnum;
 import com.zjcc.ccpicturebackend.manager.websocket.model.PictureEditMessageTypeEnum;
 import com.zjcc.ccpicturebackend.manager.websocket.model.PictureEditRequestMessage;
@@ -85,7 +86,8 @@ public class PictureEditHandler extends TextWebSocketHandler {
     }
 
     // 全部广播
-    private void broadcastToPicture(Long pictureId, PictureEditResponseMessage pictureEditResponseMessage) throws Exception {
+    private void broadcastToPicture(Long pictureId,
+                                    PictureEditResponseMessage pictureEditResponseMessage) throws Exception {
         broadcastToPicture(pictureId, pictureEditResponseMessage, null);
     }
 
@@ -125,46 +127,72 @@ public class PictureEditHandler extends TextWebSocketHandler {
 
     /**
      * 接收客户端消息的方法，根据消息类别执行不同的处理
-     *
+     * 原始方法 - 废弃
+     * @param session session
+     * @param message message
+     */
+    // @Override
+    // protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+    //     // message.getPayload() 拿到的是前端发过来的一段 JSON 字符串(纯文本),内容长什么样完全由后端规定。
+    //     // 后端定义了 PictureEditRequestMessage:
+    //     // 前端必须按这个结构发 JSON,比如 {"type":"ENTER_EDIT","editAction":"xxx"}
+    //     // 等价于 HTTP 接口的请求 DTO。前端照着发,后端照着接
+    //     PictureEditRequestMessage requestMessage = JSONUtil.toBean(message.getPayload(), PictureEditRequestMessage.class);
+    //
+    //     Map<String, Object> attributes = session.getAttributes();
+    //     User user = (User) attributes.get("user");
+    //     Long pictureId = (Long) attributes.get("pictureId");
+    //
+    //     String type = requestMessage.getType();
+    //     PictureEditMessageTypeEnum enumByValue = PictureEditMessageTypeEnum.getEnumByValue(type);
+    //     String editAction = requestMessage.getEditAction();
+    //
+    //     // 调用对应的消息处理方法
+    //     // TODO 将每个处理器封装为单独的类（设计模式中 - 策略模式），根据消息类别调用不同的处理器类。
+    //     switch (enumByValue) {
+    //         case ENTER_EDIT:
+    //             handleEnterEditMessage(requestMessage,session,user,pictureId);
+    //             break;
+    //         case EXIT_EDIT:
+    //             handleExitEditMessage(requestMessage, session, user, pictureId);
+    //             break;
+    //         case EDIT_ACTION:
+    //             handleEditActionMessage(requestMessage, session, user, pictureId);
+    //             break;
+    //         default:
+    //             PictureEditResponseMessage pictureEditResponseMessage = new PictureEditResponseMessage();
+    //             pictureEditResponseMessage.setType(PictureEditMessageTypeEnum.ERROR.getValue());
+    //             pictureEditResponseMessage.setMessage("消息类型错误");
+    //             pictureEditResponseMessage.setUser(userService.getUserVO(user));
+    //             session.sendMessage(new TextMessage(JSONUtil.toJsonStr(pictureEditResponseMessage)));
+    //     }
+    //
+    // }
+
+    @Resource
+    private PictureEditEventProducer pictureEditEventProducer;
+
+    /**
+     * 接收客户端消息的方法，根据消息类别执行不同的处理
+     * 引入 Disruptor 后新方法
      * @param session session
      * @param message message
      */
     @Override
-    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
-        // message.getPayload() 拿到的是前端发过来的一段 JSON 字符串(纯文本),内容长什么样完全由后端规定。
-        // 后端定义了 PictureEditRequestMessage:
-        // 前端必须按这个结构发 JSON,比如 {"type":"ENTER_EDIT","editAction":"xxx"}
-        // 等价于 HTTP 接口的请求 DTO。前端照着发,后端照着接
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+        // 将消息解析为 PictureEditMessage
         PictureEditRequestMessage requestMessage = JSONUtil.toBean(message.getPayload(), PictureEditRequestMessage.class);
-
+        // 从 Session 属性中获取公共参数
         Map<String, Object> attributes = session.getAttributes();
         User user = (User) attributes.get("user");
         Long pictureId = (Long) attributes.get("pictureId");
-
-        String type = requestMessage.getType();
-        PictureEditMessageTypeEnum enumByValue = PictureEditMessageTypeEnum.getEnumByValue(type);
-        String editAction = requestMessage.getEditAction();
-
-        // 调用对应的消息处理方法
-        // TODO 将每个处理器封装为单独的类（设计模式中 - 策略模式），根据消息类别调用不同的处理器类。
-        switch (enumByValue) {
-            case ENTER_EDIT:
-                handleEnterEditMessage(requestMessage,session,user,pictureId);
-                break;
-            case EXIT_EDIT:
-                handleExitEditMessage(requestMessage, session, user, pictureId);
-                break;
-            case EDIT_ACTION:
-                handleEditActionMessage(requestMessage, session, user, pictureId);
-                break;
-            default:
-                PictureEditResponseMessage pictureEditResponseMessage = new PictureEditResponseMessage();
-                pictureEditResponseMessage.setType(PictureEditMessageTypeEnum.ERROR.getValue());
-                pictureEditResponseMessage.setMessage("消息类型错误");
-                pictureEditResponseMessage.setUser(userService.getUserVO(user));
-                session.sendMessage(new TextMessage(JSONUtil.toJsonStr(pictureEditResponseMessage)));
-        }
-
+        // 生产消息
+        // TODO 1、为防止消息丢失 + 2.分布式 WebSocket
+        // 1、为防止消息丢失，可以使用 Redis 等高性能存储保存执行的操作记录。
+        // 目前如果图片已经被编辑了，新用户加入编辑时没办法查看到已编辑的状态，可以利用 Redis 保存操作记录来解决，新用户加入编辑时读取 Redis 的操作记录即可。
+        // 
+        // 2、支持分布式 WebSocket。实现思路很简单，只需要保证要编辑同一图片的用户连接的是相同的服务器即可，和游戏分服务器大区、聊天室分房间是类似的原理。
+        pictureEditEventProducer.publishEvent(requestMessage, session, user, pictureId);
     }
 
 
