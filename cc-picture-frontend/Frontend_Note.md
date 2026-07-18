@@ -521,3 +521,88 @@ const res = await addUserUsingPost({ userAccount: 'tom', userName: 'Tom' })
 - `request` 作为 axios 实例为什么能「带泛型被调用」(axios 类型源码层面)。
 - 这套 OpenAPI 生成器(`openapi.config.js`)是怎么从后端文档产出这些代码的。
 - 怎么手动封装一个带 `BaseResponse<T>` 自动解包的 `request` 函数(目前调用方每次都要 `res.data.data`,可以优化)。
+
+---
+
+## Vue 单页应用(SPA) 启动流程:index.html → main.ts → App.vue
+
+> 问题缘起:访问项目时,全局网页挂载流程是怎样的?又是 App,又是 main.ts,又是 index.html;为什么在 App.vue 里 `fetch` 而不是 main.ts 里获取?
+
+一个 Vue 单页应用(SPA)启动时,实际上只有**一个真实页面** `index.html`,其余全是 JS 动态生成。下面按时间顺序把这条链子串起来。
+
+### 一、启动链路(谁触发谁)
+
+```
+浏览器打开网址
+   │
+   ▼
+① index.html            ← 唯一的真实 HTML 页面
+   │   <div id="app"></div>           ← 空的挂载点
+   │   <script src="/src/main.ts">    ← 入口脚本
+   ▼
+② main.ts 被执行         ← "搭舞台"
+   │   createApp(App)    → 创建 Vue 应用实例
+   │   app.use(Antd)     → 注册组件库
+   │   app.use(createPinia()) → 注册状态管理
+   │   app.use(router)   → 注册路由
+   │   app.mount('#app') → 把 App.vue 渲染进那个空 div
+   ▼
+③ App.vue 渲染            ← 根组件开始工作
+   │   <script setup> 执行 → 此时调 fetchLoginUser()
+   │   模板渲染 <BasicLayout />
+   ▼
+④ BasicLayout.vue 渲染
+   │   <GlobalHeader />    ← 头部
+   │   <router-view />     ← 当前路由对应的页面
+   ▼
+⑤ GlobalHeader.vue 渲染
+       读取 loginUserStore.loginUser → 显示用户名/登录按钮
+```
+
+**记忆要点**:`index.html`(壳)→ `main.ts`(引导)→ `App.vue`(根组件)→ 子组件层层渲染。`#app` 这个 id 在 [index.html:10](index.html#L10) 和 [main.ts:13](src/main.ts#L13) 是**同一个东西**——main.ts 把 App.vue 挂到那个 div 里。
+
+### 二、三者的职责分工
+
+| 文件 | 角色 | 干什么 | 不该干什么 |
+|------|------|--------|-----------|
+| `index.html` | 外壳 | 提供页面骨架 + 指定入口脚本 | 不写业务逻辑 |
+| `main.ts` | 引导程序 | 创建 app、装插件、挂载 | 不写业务请求 |
+| `App.vue` | 根组件 | 应用启动后的入口、全局初始化 | 不管具体页面布局(交给 BasicLayout) |
+
+### 三、为什么 fetch 放 App.vue,不放 main.ts?
+
+两个原因:
+
+#### 1. 时序问题(Pinia 还没就绪)
+
+在 main.ts 里如果想用 store,代码大概长这样:
+
+```ts
+const pinia = createPinia()
+app.use(pinia)
+const store = useLoginUserStore()  // ❌ app 还没 mount,会报错/拿不到正确实例
+store.fetchLoginUser()
+app.mount('#app')
+```
+
+Pinia 的 store 依赖 **active pinia 实例**。这个"激活"动作是在 `app.mount()` 之后、组件 `setup` 执行时才自动完成的。在 main.ts 顶层直接调 `useLoginUserStore()` 会失败或警告。
+
+而 App.vue 的 `<script setup>` 是在**挂载后**执行的,此时 Pinia、Router 全部就绪,调用 store 完全安全。见 [App.vue:10-11](src/App.vue#L10-L11):
+
+```ts
+const loginUserStore = useLoginUserStore()  // ✅ 此时 Pinia 已激活
+loginUserStore.fetchLoginUser()
+```
+
+#### 2. 职责清晰
+
+- **main.ts** = "搭舞台的人",只管把 Vue + Pinia + Router + Antd 装配起来。它不该关心"登录用户是谁"这种**业务**问题。
+- **App.vue** = "应用本身",应用一启动就要知道"当前登录用户是谁"——这是应用级初始化,放在根组件最合理。
+
+而且 `<script setup>` 的代码会在组件创建时**自动执行一次**,正好符合"应用启动时拉一次"的需求;拉到数据后更新 `loginUser.value`,由于是响应式 `ref`,所有用到它的子组件(GlobalHeader)会**自动更新**,无需额外操作。
+
+### 四、一句话总结
+
+> `index.html` 是壳,`main.ts` 负责把舞台搭好并挂载,`App.vue` 是挂载后第一个跑起来的业务组件——所以**应用级初始化(如拉取登录态)放 App.vue**,既满足 Pinia 就绪的时序,又符合"根组件负责全局初始化"的职责划分。
+
+---
