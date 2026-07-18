@@ -21,7 +21,20 @@
       <a-col flex="120px">
         <div class="user-login-status">
           <div v-if="loginUserStore.loginUser.id">
-            {{ loginUserStore.loginUser.userName ?? '无名氏' }}
+            <a-dropdown>
+              <a-space>
+                <a-avatar :src="loginUserStore.loginUser.userAvatar" />
+                {{ loginUserStore.loginUser.userName ?? '无名' }}
+              </a-space>
+              <template #overlay>
+                <a-menu>
+                  <a-menu-item @click="doLogout">
+                    <LogoutOutlined />
+                    退出登录
+                  </a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
           </div>
           <div v-else>
             <a-button type="primary" href="/user/login">登录</a-button>
@@ -34,33 +47,49 @@
 <script lang="ts" setup>
 import { h, ref } from 'vue'
 import { HomeOutlined } from '@ant-design/icons-vue'
-import type { MenuProps } from 'ant-design-vue'
+import { message, type MenuProps } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import { useLoginUserStore } from '@/stores/useLoginUserStore'
+import { userLogoutUsingPost } from '@/api/userController'
 
 // 引入全局pinia
 const loginUserStore = useLoginUserStore()
-
-
-
+// 用户注销
+const doLogout = async () => {
+  const res = await userLogoutUsingPost()
+  if (res.data.code === 0) {
+    loginUserStore.setLoginUser({
+      userName: '未登录'
+    })
+    message.success('退出登录成功')
+    // 等价于 router.push({ path: '/user/login', replace: true })
+    await router.replace('/user/login')
+  } else {
+    message.error('退出登录失败，' + res.data.message)
+  }
+}
 
 const items = ref<MenuProps['items']>([
   {
     key: '/',
     icon: () => h(HomeOutlined),
     label: '主页',
-    title: '主页',
+    title: '主页'
   },
   {
     key: '/about',
     label: '关于',
-    title: '关于',
+    title: '关于'
   },
   {
     key: 'others',
-    label: h('a', { href: 'https://github.com/zjchenchang-JP', target: '_blank' }, 'Author Github'),
-    title: 'Author Github',
-  },
+    label: h(
+      'a',
+      { href: 'https://github.com/zjchenchang-JP', target: '_blank' },
+      'Author Github'
+    ),
+    title: 'Author Github'
+  }
 ])
 
 const router = useRouter()
@@ -69,15 +98,13 @@ const current = ref<string[]>([])
 // 路由跳转事件
 const onMenuClick = ({ key }) => {
   router.push({
-    path: key,
+    path: key
   })
 }
 // 监听路由变化，高亮当前选中菜单
 router.afterEach((to, from, next) => {
   current.value = [to.path]
 })
-
-
 </script>
 
 <style scoped>
@@ -96,4 +123,3 @@ router.afterEach((to, from, next) => {
   height: 48px;
 }
 </style>
-
