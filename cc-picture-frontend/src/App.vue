@@ -9,8 +9,8 @@ import BasicLayout from '@/layouts/BasicLayout.vue'
 import {useLoginUserStore} from "@/stores/useLoginUserStore.ts";
 // 初始化数据(发请求拉数据)
 // 首次进入到页面时，一般会尝试获取登录用户信息
-const loginUserStore = useLoginUserStore()
-loginUserStore.fetchLoginUser()
+// const loginUserStore = useLoginUserStore()
+// loginUserStore.fetchLoginUser() // 已改为 access.ts 中统一获取登录用户信息, 移除
 
 </script>
 

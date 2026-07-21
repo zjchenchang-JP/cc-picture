@@ -45,7 +45,7 @@
   </div>
 </template>
 <script lang="ts" setup>
-import { h, ref } from 'vue'
+import { computed, h, ref } from 'vue'
 import { HomeOutlined } from '@ant-design/icons-vue'
 import { message, type MenuProps } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
@@ -69,7 +69,7 @@ const doLogout = async () => {
   }
 }
 
-const items = ref<MenuProps['items']>([
+const originItems = ref<MenuProps['items']>([
   {
     key: '/',
     icon: () => h(HomeOutlined),
@@ -77,9 +77,9 @@ const items = ref<MenuProps['items']>([
     title: '主页'
   },
   {
-    key: '/about',
-    label: '关于',
-    title: '关于'
+    key: '/admin/userManage',
+    label: '用户管理',
+    title: '用户管理'
   },
   {
     key: 'others',
@@ -91,6 +91,23 @@ const items = ref<MenuProps['items']>([
     title: 'Author Github'
   }
 ])
+// 权限控制 非admin不应该看见 ‘用户管理’ 菜单
+// 过滤菜单项
+const filterMenus = (menus = [] as MenuProps['items']) => {
+  return menus?.filter((menu) => {
+    if (menu.key?.startsWith('/admin')) {
+      const loginUser = loginUserStore.loginUser
+      if (!loginUser || loginUser.userRole !== "admin") {
+        return false
+      }
+    }
+    return true
+  })
+}
+
+// 展示在菜单的路由数组（注意 originItems 是 ref，要传 .value 解包后的真实数组）
+const items = computed<MenuProps['items']>(() => filterMenus(originItems.value))
+
 
 const router = useRouter()
 // 当前选中菜单
