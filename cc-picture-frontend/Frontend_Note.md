@@ -733,3 +733,309 @@ onMounted(() => fetchData())                  // 别忘了触发
 > `if (x)` 走 truthy/falsy 规则,空数组 `[]`、空对象 `{}` 都是 truthy——分页接口返回的 `Page` 对象恒为 truthy,判断"有没有数据"要看 `records.length`。`async/await` 是异步(不卡浏览器),`await` 是在函数内部"优雅地等结果",两者配合:既不卡死页面、又能拿到数据;正因如此,页面可以先画空表格,等数据回来再由响应式自动刷新。
 
 ---
+
+# 2026/07/21
+
+## access.ts 全局权限控制:Vue Router 路由守卫 + Pinia 状态校验
+```ts
+// 全局权限控制文件。可以利用 Vue Router 的路由守卫实现，
+// 每次切换并进入页面前，都会检查一下当前用户是否具有特定页面的权限
+import { useLoginUserStore } from '@/stores/useLoginUserStore'
+import { message } from 'ant-design-vue'
+import router from '@/router'
+
+// 是否为首次获取登录用户
+let firstFetchLoginUser = true
+
+/**
+ * 全局权限校验
+ */
+router.beforeEach(async (to,from,next) => {
+  const loginUserStore = useLoginUserStore()
+  let loginUser = loginUserStore.loginUser
+  // 确保页面刷新，首次加载时，能够等后端返回用户信息后再校验权限
+  // 为了防止每次切换路由都从远程获取用户​​​信息，定义了 firstFetchLoginUser ⁠⁠⁠变量
+  // 用于控制在刷新页面后只会请求后端一次
+  if (firstFetchLoginUser) {
+    await loginUserStore.fetchLoginUser()
+    loginUser = loginUserStore.loginUser
+    firstFetchLoginUser = false
+  }
+  // 不是首次
+  const toUrl = to.fullPath
+  // 管理员权限
+  if (toUrl.startsWith('/admin')) {
+    if (!loginUser || loginUser.userRole !== 'admin') {
+      message.error('没有权限')
+      next(`/user/login?redirect=${to.fullPath}`)
+      return
+    }
+  }
+  next()
+})
+
+```
+
+> 问题缘起:这个文件在 `main.ts` 里被 `import './access'` 引入(只为副作用,不取任何导出),它到底干了什么?为什么一个"空导入"就能实现全局权限拦截?刷新页面后 Pinia 状态丢了,权限会不会判错?
+
+### 一、文件整体定位
+
+`access.ts` 是项目的**全局权限控制中心**。它利用 Vue Router 的**全局前置守卫** `router.beforeEach`,在每次路由切换**之前**插入一段校验逻辑:检查当前用户是否有权限访问目标页面,没有就拦截并跳转登录。完整源码见 [access.ts](src/access.ts)。
+
+文件很短,但浓缩了 Vue 全家桶的几个核心概念:路由守卫、Pinia 状态、async/await、模块级单例。
+
+### 二、开头三行:模块导入
+
+```ts
+import { useLoginUserStore } from '@/stores/useLoginUserStore'
+import { message } from 'ant-design-vue'
+import router from '@/router'
+```
+
+| 语句 | 导入方式 | 说明 |
+|------|----------|------|
+| `{ useLoginUserStore }` | **命名导入** | 从 Pinia store 文件取出工厂函数,花括号里名字必须与导出一致 |
+| `{ message }` | **命名导入** | ant-design-vue 的全局消息组件,`message.error(...)` 弹红色错误提示 |
+| `router` | **默认导入** | 取出 `@/router` 的 `default` 导出(路由实例),名字可自定义 |
+
+- `@/` 是 Vite 配的路径别名,指 `src/` 目录,避免写 `../../` 相对路径。
+- **Pinia store 命名约定**:工厂函数以 `use` 开头(`useLoginUserStore`),调用后返回响应式的全局状态对象。
+
+### 三、模块级变量:解决刷新丢状态的关键
+
+```ts
+let firstFetchLoginUser = true
+```
+
+- `let`:块级作用域、可重新赋值的变量(第 20 行会改成 `false`)。
+- **关键概念——模块级单例**:它写在模块顶层,整个应用生命周期内**只有一份**,跨路由跳转都共享;只有**刷新页面**才会重置为 `true`。
+
+为什么要这个标记?因为存在一个经典痛点:
+
+> Pinia 把状态存在 JS 内存里,**一刷新页面内存就清空**,`loginUser` 变回初始空值。如果此时直接做权限判断,会误判"用户没登录"。所以首次进入时,必须**先等后端接口返回真实登录态**,再判断;判断完就置为 `false`,后续跳转不再重复请求。
+
+### 四、router.beforeEach —— 全局前置守卫(核心)
+
+```ts
+router.beforeEach(async (to, from, next) => {
+  ...
+})
+```
+
+这是 Vue Router 的**全局前置守卫**。每次路由切换前都会**异步**执行这个回调,执行完(或 `next` 被调用)才决定是否真正跳转。
+
+#### 守卫三参数
+
+| 参数 | 含义 | 类型 |
+|------|------|------|
+| `to` | 即将进入的目标路由对象 | `RouteLocationNormalized` |
+| `from` | 当前正要离开的路由对象 | `RouteLocationNormalized` |
+| `next` | 控制跳转走向的函数(Vue Router 4 可省略,这里保留传统写法) | `(to?) => void` |
+
+#### 路由对象的常用属性
+
+- `to.fullPath`:**完整路径**(含 query 参数),如 `/admin/user` 或 `/user/login?redirect=/xxx`。
+- `to.path`:仅路径部分,不含 query。
+
+#### next() 的三种用法(本文件用了两种)
+
+```ts
+next()                                  // 放行,继续进入 to
+next(`/user/login?redirect=${...}`)     // 强制重定向到登录页
+// next(false)                          // 中断当前导航,留在原地(本文件没用)
+```
+
+### 五、async / await —— 等后端返回再判断
+
+```ts
+router.beforeEach(async (to, from, next) => {
+  if (firstFetchLoginUser) {
+    await loginUserStore.fetchLoginUser()   // ← 关键
+    loginUser = loginUserStore.loginUser
+    firstFetchLoginUser = false
+  }
+  ...
+})
+```
+
+- `async`:把守卫标为异步函数。**Vue Router 的守卫天然支持返回 Promise**,所以用 `async` 函数完美兼容——它会等函数内所有 `await` 跑完。
+- `await`:**暂停当前守卫函数**,等后端接口 resolve 后再继续。
+
+**为什么必须 await?** `fetchLoginUser()` 内部发的是异步 HTTP 请求,若不 await,下一行 `loginUser = loginUserStore.loginUser` 拿到的还是旧值(空),权限判断必然出错。这和 [userManagePage.vue](src/pages/admin/userManagePage.vue) 里"要展示数据就必须 await"是同一个道理——详见上一篇「异步数据加载」。
+
+### 六、Pinia store 的读取
+
+```ts
+const loginUserStore = useLoginUserStore()
+let loginUser = loginUserStore.loginUser
+```
+
+- `useLoginUserStore()`:在守卫里**按需调用**拿到同一个 store 实例(Pinia 是单例)。
+- `loginUserStore.loginUser`:直接访问 store 里响应式状态 `loginUser`(当前登录用户对象)。
+- `const` vs `let` 的细节:`const loginUserStore` 因为引用固定不变;`let loginUser` 因为第 19 行要**重新赋值**为更新后的用户对象。
+
+### 七、权限判断逻辑与重定向
+
+```ts
+const toUrl = to.fullPath
+
+if (toUrl.startsWith('/admin')) {
+  if (!loginUser || loginUser.userRole !== 'admin') {
+    message.error('没有权限')
+    next(`/user/login?redirect=${to.fullPath}`)
+    return
+  }
+}
+next()
+```
+
+涉及的语法点:
+
+1. **`String.prototype.startsWith()`**:判断字符串是否以指定前缀开头。这里用来识别"管理员专属页面"(`/admin/*`)。
+2. **短路求值 `||`**:`!loginUser || loginUser.userRole !== 'admin'` —— "未登录"**或**"角色不是 admin"任一成立即无权限。
+   - **顺序很重要**:先判 `!loginUser`,若未登录就直接短路,避免对 `undefined` 读 `userRole` 报错。
+3. **模板字符串** `` `/user/login?redirect=${to.fullPath}` ``:把用户原本想去的路径作为 `redirect` query 参数传给登录页,**登录成功后可跳回原页面**,体验更好。
+4. **`return`**:`next(...)` 后**必须 return**,否则会继续执行到末尾的 `next()`,导致"重定向"和"放行"同时触发,产生导航冲突。
+5. **末尾 `next()`**:所有检查通过后的"默认放行"。
+
+### 八、整体流程图
+
+```
+任意路由跳转触发
+   │
+   ▼
+beforeEach 执行
+   │
+   ├─ 是首次加载? ──是──→ await 请求后端拿登录用户,标记为非首次
+   │
+   ▼
+目标 URL 以 /admin 开头?
+   ├─ 是 ─→ 未登录 或 非admin? ──是──→ message.error + 跳登录页(带 redirect) + return
+   │                              └─否─┐
+   └─ 否 ─────────────────────────────→ next() 放行
+```
+
+### 九、概念小结
+
+| 概念 | 在本文件的作用 |
+|------|----------------|
+| **Vue Router 全局前置守卫** | 拦截所有路由跳转做权限校验 |
+| **Pinia 状态管理** | 读取/同步全局登录用户状态 |
+| **ES Module**(命名/默认导入、路径别名) | 引入依赖 |
+| **async/await** | 等待异步接口返回再判断 |
+| **模块级单例变量** | 标记"是否首次",处理刷新丢状态问题 |
+| **路由对象**(to/from/next、fullPath) | 获取目标路径、控制导航走向 |
+| **模板字符串 + query 参数 redirect** | 登录后回跳到原目标页 |
+| **短路求值 `||`** | 安全地做"未登录或权限不足"判断 |
+| **副作用导入**(main.ts 里 `import './access'`) | 不取导出,只为注册守卫 |
+
+### 十、一句话总结
+
+> `access.ts` 用 `router.beforeEach` 把"权限校验"插到每次跳转前:靠**模块级变量**识别首次加载、用 **await** 等后端返回真实登录态、用 **短路判断 + 重定向**拦下无权访问——这就是一个不写组件、只靠"副作用导入"就能守护全站路由的轻量方案。
+
+---
+
+## GlobalHeader.vue 菜单过滤:ref 解包、计算属性与一次 "filter is not a function" 排错
+
+> 问题缘起:用 `filter` 按 `userRole` 动态隐藏"用户管理"菜单,结果控制台报 `Uncaught TypeError: menus?.filter is not a function`。明明写了可选链 `?.`,为什么还是崩了?
+
+### 一、报错现场与原始代码
+
+[GlobalHeader.vue](src/components/GlobalHeader.vue) 里用一份静态菜单 `originItems`,经 `filterMenus` 过滤后交给 `computed` 生成实际展示的 `items`:
+
+```ts
+const originItems = ref<MenuProps['items']>([ ... ])
+
+// 权限控制 非admin不应该看见 '用户管理' 菜单
+const filterMenus = (menus = [] as MenuProps['items']) => {
+  return menus?.filter((menu) => {
+    if (menu.key.startsWith('/admin')) {
+      const loginUser = loginUserStore.loginUser
+      if (!loginUser || loginUser.userRole !== "admin") {
+        return false
+      }
+    }
+    return true
+  })
+}
+
+// 展示在菜单的路由数组
+const items = computed<MenuProps['items']>(() => filterMenus(originItems))
+```
+
+### 二、根因:ref 没有解包 `.value`
+
+问题出在最后一行 `filterMenus(originItems)`——`originItems` 是 `ref(...)`,它是个 **RefImpl 包装对象**,真正的数组藏在 `.value` 里。把 ref 对象本身传进函数,于是:
+
+1. 形参 `menus` 拿到的是 **RefImpl**(既不是 `null` 也不是 `undefined`)。
+2. `menus?.filter(...)`:可选链 `?.` **只在左侧为 `null`/`undefined` 时短路**,RefImpl 都不是,所以**不短路**,继续访问 `.filter`。
+3. RefImpl 上没有 `.filter` 属性 → `menus?.filter` 求值为 `undefined`。
+4. 紧接着 `undefined(...)` 调用 → **`TypeError: menus?.filter is not a function`**。
+
+> 默认参数 `menus = []` 和可选链 `?.` 都没救得了它——它们只防 `undefined`,不防"传错了类型的对象"。
+
+### 三、修复
+
+**最小改动**:在 computed 里解包 ref。
+
+```ts
+const items = computed<MenuProps['items']>(() => filterMenus(originItems.value))
+```
+
+**更地道的可选优化**:菜单数据是静态的,本就不需要 `ref`,直接用普通常量,顺带消灭 `.value` 的坑:
+
+```ts
+const originItems: MenuProps['items'] = [ ... ]
+const items = computed<MenuProps['items']>(() => filterMenus(originItems))
+```
+
+响应式不会丢——真正驱动菜单变化的是 `filterMenus` 内部读到的 `loginUserStore.loginUser`,跟 `originItems` 是不是 ref 无关。
+
+### 四、涉及的语法逐点拆
+
+#### 1. `ref<MenuProps['items']>([...])`
+
+- `ref<T>(value)`:创建响应式引用,泛型 `T` 指明包裹值类型。**模板里自动解包,`<script>` 里必须 `.value`**——这是 bug 的温床。
+- `MenuProps['items']`:**索引访问类型**(indexed access type),取 `MenuProps` 类型里 `items` 属性的类型,复用 ant-design-vue 官方定义,免手写。
+
+#### 2. 菜单项字段:key / icon / label / title
+
+| 字段 | 作用 | 本文件用法 |
+|------|------|-----------|
+| `key` | 菜单唯一标识,点击事件 `onMenuClick({ key })` 会拿到 | 巧妙用**路由 path** 当 key,点击即跳转 |
+| `icon` | 图标,**接收返回 VNode 的函数** | `() => h(HomeOutlined)` |
+| `label` | 菜单文字,可以是字符串或 VNode | 第三项用 `h('a', ...)` 渲染 `<a>` 外链 |
+| `title` | 鼠标悬停小气泡 | 纯展示 |
+
+#### 3. `h()` 渲染函数
+
+`h` 是 createVNode 的简写,签名 `h(类型, props, children)`:
+
+```ts
+h(HomeOutlined)                                          // 渲染组件
+h('a', { href, target: '_blank' }, 'Author Github')      // 渲染原生 <a>
+```
+
+`icon` 写成箭头函数 `() => h(...)`,是因为 ant-design-vue 约定 `icon` 接收**函数**(延迟渲染)。
+
+#### 4. `filterMenus` 里的语法点
+
+- **默认参数 + 类型断言** `menus = [] as MenuProps['items']`:不传参时用 `[]` 兜底,`as` 告诉 TS 把空数组当菜单项类型(否则推断成 `never[]`)。
+- **可选链 `?.filter`**:防 `undefined`。⚠️ **只防 `null`/`undefined`**,不防类型不对的对象(正是本次 bug)。
+- **`Array.prototype.filter`**:回调返回 `true` 保留、`false` 剔除。
+- **`menu.key.startsWith('/admin')`**:前缀匹配识别管理员菜单。
+- **短路求值 `||`**:`!loginUser || loginUser.userRole !== "admin"`,先判未登录避免对 `undefined` 读属性报错(和 [access.ts](src/access.ts) 同款写法)。
+
+#### 5. `computed` 与响应式闭环
+
+`computed<T>(() => ...)` 声明计算属性,返回只读 ref,依赖变化才重算且带缓存。这里 `filterMenus` 内部访问了 `loginUserStore.loginUser`(Pinia state),所以 `items` 把登录态当作依赖——**登录/注销后菜单自动重新过滤**,admin 登录后"用户管理"项立刻出现,无需手动刷新。
+
+### 五、一个潜在 TS 告警(运行时不影响)
+
+`MenuProps['items']` 元素是联合类型(普通项 / 子菜单 / 分组…),并非每条都有 `key`。严格类型检查下 `menu.key` 可能报"属性不存在",稳妥写法是 `menu.key?.startsWith('/admin')`。
+
+### 六、一句话总结
+
+> 报错本质是 `ref` 对象没解包就被当数组用,`?.` 只防 `undefined` 防不了"类型不对"的对象,改成 `filterMenus(originItems.value)` 即可;整段逻辑的灵魂是——**用路由 path 当菜单 key、用 `filter` 按 `userRole` 裁剪菜单、用 `computed` 让菜单随登录态自动更新**。
+
+---
