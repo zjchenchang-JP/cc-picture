@@ -82,6 +82,11 @@ const originItems = ref<MenuProps['items']>([
     title: '用户管理'
   },
   {
+    key: '/add_picture',
+    label: '创建图片',
+    title: '创建图片',
+  },
+  {
     key: 'others',
     label: h(
       'a',
