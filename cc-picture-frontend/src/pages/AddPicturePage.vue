@@ -1,6 +1,8 @@
 <template>
   <div id="addPicturePage">
-    <h2 style="margin-bottom: 16px">创建图片</h2>
+    <h2 style="margin-bottom: 16px">  
+      {{ route.query?.id ? '修改图片' : '创建图片' }}  
+    </h2>
     <PictureUpload :picture="picture" :onSuccess="onSuccess" />
     <!-- 图片信息表单 -->
     <a-form v-if="picture" layout="vertical" :model="pictureForm" @finish="handleSubmit">
@@ -45,6 +47,7 @@
 <script setup lang="ts">
 import {
   editPictureUsingPost,
+  getPictureVoByIdUsingGet,
   listPictureTagCategoryUsingGet
 } from '@/api/pictureController'
 import PictureUpload from '@/components/PictureUpload.vue'
@@ -53,7 +56,6 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 const router = useRouter()
-const route = useRoute()
 
 const picture = ref<API.PictureVO>()
 const pictureForm = reactive<API.PictureEditRequest>({})
@@ -117,10 +119,45 @@ const getTagCategoryOptions = async () => {
     message.error('加载选项失败，' + res.data.message)
   }
 }
-
+// 「页面挂载时初始化」
 onMounted(() => {
   getTagCategoryOptions()
 })
+
+const route = useRoute()
+/**
+ * 修改图片信息
+ */
+// 获取要修改的图片信息
+const getOldPicture = async () => {
+  // 获取到 id（query 参数本身就是字符串）
+  // ⚠️ 不能用 Number()：雪花 id 超过 JS 安全整数(2^53)，会丢精度
+  // （2080910661127073794 → 2080910661127073800），后端就查不到了。
+  // 后端已配置 Long→String 序列化(JsonConfig)，id 全程保持字符串即可。
+  const id = route.query?.id
+  if (id) {
+    const res = await getPictureVoByIdUsingGet({
+      // 运行时 id 是 string，但 openapi 生成的类型是 number，用断言绕过
+      id: id as unknown as number,
+    })
+    if (res.data.code === 0 && res.data.data) {
+      const data = res.data.data
+      picture.value = data
+      pictureForm.name = data.name
+      pictureForm.introduction = data.introduction
+      pictureForm.category = data.category
+      pictureForm.tags = data.tags
+    }
+  }
+}
+/**
+ * 多个 onMounted 的回调互相独立,一个里的 await 管不到另一个。 
+ * 但如果 B 依赖 A 的结果,必须放进同一个 onMounted 用 await 串起来
+ */
+onMounted(() => {
+  getOldPicture()
+})
+
 </script>
 
 <style scoped>
