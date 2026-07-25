@@ -84,7 +84,12 @@ const originItems = ref<MenuProps['items']>([
   {
     key: '/add_picture',
     label: '创建图片',
-    title: '创建图片',
+    title: '创建图片'
+  },
+  {
+    key: '/admin/pictureManage',
+    label: '图片管理',
+    title: '图片管理'
   },
   {
     key: 'others',
@@ -99,10 +104,10 @@ const originItems = ref<MenuProps['items']>([
 // 权限控制 非admin不应该看见 ‘用户管理’ 菜单
 // 过滤菜单项
 const filterMenus = (menus = [] as MenuProps['items']) => {
-  return menus?.filter((menu) => {
+  return menus?.filter(menu => {
     if (menu.key?.startsWith('/admin')) {
       const loginUser = loginUserStore.loginUser
-      if (!loginUser || loginUser.userRole !== "admin") {
+      if (!loginUser || loginUser.userRole !== 'admin') {
         return false
       }
     }
@@ -112,7 +117,6 @@ const filterMenus = (menus = [] as MenuProps['items']) => {
 
 // 展示在菜单的路由数组（注意 originItems 是 ref，要传 .value 解包后的真实数组）
 const items = computed<MenuProps['items']>(() => filterMenus(originItems.value))
-
 
 const router = useRouter()
 // 当前选中菜单
