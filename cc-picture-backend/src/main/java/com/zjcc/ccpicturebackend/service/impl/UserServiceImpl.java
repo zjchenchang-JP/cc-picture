@@ -64,6 +64,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         queryWrapper.eq("userAccount", userAccount);
         long count = this.baseMapper.selectCount(queryWrapper);
         if (count > 0) {
+            // TODO 如果注册账号和已经逻辑删除的一致，会引发 DuplicateKeyException
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号重复");
         }
         // 3. 加密
