@@ -1039,3 +1039,473 @@ h('a', { href, target: '_blank' }, 'Author Github')      // 渲染原生 <a>
 > 报错本质是 `ref` 对象没解包就被当数组用,`?.` 只防 `undefined` 防不了"类型不对"的对象,改成 `filterMenus(originItems.value)` 即可;整段逻辑的灵魂是——**用路由 path 当菜单 key、用 `filter` 按 `userRole` 裁剪菜单、用 `computed` 让菜单随登录态自动更新**。
 
 ---
+
+# 2026/07/25
+
+## 受控组件 PictureUpload:从语法到前后端联动的完整拆解
+
+> 问题缘起:写图片上传组件 [PictureUpload.vue](src/components/PictureUpload.vue) 时,疑问像滚雪球一样冒出来——
+> 1. `defineProps<Props>()` 这种泛型写法到底是什么意思?`onSuccess?: (...) => void` 这种"函数当 prop"又怎么理解?
+> 2. 注释说它是"受控组件",到底受谁控制?跟普通组件有什么区别?
+> 3. [PictureUpload.vue](src/components/PictureUpload.vue) 和 [AddPicturePage.vue](src/pages/AddPicturePage.vue) 两个文件,数据是怎么来回联动的?
+> 4. 上传时 `res.data.code` 为什么会报「类型 `T` 上不存在属性 `code`」?
+> 5. `uploadPictureUsingPost(params, {}, file)` 里那个空对象 `{}` 是干嘛的?后端明明需要 `PictureUploadRequest`,传空对象后端怎么收?
+> 6. 后端的 `requestType: 'form'` 从哪来?为什么教程里的版本不用补类型?
+>
+> 这篇笔记把整条线索串起来:从一个组件的语法,到父子联动,再到一次完整的前后端文件上传请求。
+
+### 附:完整源码
+
+#### PictureUpload.vue(子组件 / 受控组件)
+
+```vue
+<template>
+  <div id="pictureUpload" class="picture-upload">
+    <a-upload
+      list-type="picture-card"
+      :show-upload-list="false"
+      :customRequest="handleUpload"
+      :before-upload="beforeUpload"
+    >
+      <img v-if="picture?.url" :src="picture?.url" alt="avatar" />
+      <div v-else>
+        <loading-outlined v-if="loading"></loading-outlined>
+        <plus-outlined v-else></plus-outlined>
+        <div class="ant-upload-text">点击或拖拽上传图片</div>
+      </div>
+    </a-upload>
+  </div>
+</template>
+<script lang="ts" setup>
+import { ref } from 'vue';
+import { PlusOutlined, LoadingOutlined } from '@ant-design/icons-vue';
+import { message } from 'ant-design-vue';
+import { uploadPictureUsingPost } from '@/api/pictureController';
+
+/**
+ * 受控组件
+ * 由父组件 (图片创建页面 AddPicturePage) 来管理
+ */
+interface Props {
+  picture?: API.PictureVO
+  onSuccess?: (newPicture: API.PictureVO) => void
+}
+
+const props = defineProps<Props>()
+
+/** 上传前校验 */
+const beforeUpload = (file: File) => {
+  const isJpgOrPng = file.type === 'image/jpeg' || file.type === 'image/png';
+  if (!isJpgOrPng) {
+    message.error('不支持上传该格式的图片，推荐 jpg 或 png');
+  }
+  const isLt2M = file.size / 1024 / 1024 < 2;
+  if (!isLt2M) {
+    message.error('不能上传超过 2M 的图片');
+  }
+  return isJpgOrPng && isLt2M;
+};
+
+const loading = ref<boolean>(false)
+
+/** 上传 */
+const handleUpload = async ({file}: any) => {
+  loading.value = true
+  try {
+    // 调用后端上传图片接口时，如果已经有 pictureId
+    // 表示对已上传的图片进行更新，需要将该参数也添加到请求中，否则每次都会新增图片记录
+    const params = props.picture ? {id: props.picture.id} : {};
+    const res = await uploadPictureUsingPost(params, {}, file)
+    if (res.data.code === 0 && res.data.data){
+      message.success('图片上传成功')
+      // 将上传成功的图片信息传递给父组件
+      props.onSuccess?.(res.data.data)
+    } else {
+      message.error('图片上传失败，' + res.data.message)
+    }
+  } catch (error: any) {
+    message.error('图片上传失败：' + (error?.message ?? ''))
+  } finally {
+    loading.value = false
+  }
+}
+</script>
+<style scoped>
+.picture-upload :deep(.ant-upload) {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 152px;
+  min-height: 152px;
+}
+.picture-upload img {
+  max-width: 100%;
+  max-height: 480px;
+}
+.ant-upload-select-picture-card i {
+  font-size: 32px;
+  color: #999;
+}
+.ant-upload-select-picture-card .ant-upload-text {
+  margin-top: 8px;
+  color: #666;
+}
+</style>
+```
+
+#### AddPicturePage.vue(父组件 / 状态持有者)
+
+```vue
+<template>
+  <div id="addPicturePage">
+    <PictureUpload :picture="picture" :onSuccess="onSuccess" />
+  </div>
+</template>
+
+<script setup lang="ts">
+import PictureUpload from '@/components/PictureUpload.vue'
+import { ref } from 'vue'
+
+const picture = ref<API.PictureVO>()
+const onSuccess = (newPicture: API.PictureVO) => {
+  picture.value = newPicture
+}
+</script>
+
+<style scoped></style>
+```
+
+---
+
+### 一、第一层:`defineProps<Props>()` 语法拆解
+
+```ts
+interface Props {
+  picture?: API.PictureVO
+  onSuccess?: (newPicture: API.PictureVO) => void
+}
+
+const props = defineProps<Props>()
+```
+
+逐点拆:
+
+- `interface Props` —— TS 接口,描述「这个组件能接收哪些外部参数(props)」。
+- `picture?` —— `?` 表示**可选属性**,父组件可传可不传。类型 `API.PictureVO` 来自 [typings.d.ts](src/api/typings.d.ts) 的全局命名空间(所以不用 import)。
+- `onSuccess?: (newPicture: API.PictureVO) => void` —— 一个**函数类型的可选 prop**。`=>` 左边是参数列表,右边是返回值类型。意思是「父组件可以传一个函数进来:它接收一张新图片、没有返回值」。
+- `defineProps<Props>()` —— Vue 的**编译宏**(只在编译期生效,运行时不存在,所以它不用 import)。尖括号里的 `Props` 是**基于类型的 props 声明**:Vue 编译器读这个接口,自动把每个字段变成一个 prop 并带上类型。等价于运行时写法:
+
+```ts
+const props = defineProps({
+  picture: { type: Object, default: undefined },
+  onSuccess: { type: Function, default: undefined }
+})
+```
+
+只是 TS 写法更省事、类型也更安全。
+
+> 💡 **关键认知:prop 不只能传数据,还能传函数。** 传数据(`picture`)是父→子单向流动;传函数(`onSuccess`)是为了让子组件能"反向通知"父组件——这正是下面父子联动的基石。
+
+### 二、第二层:什么是"受控组件"
+
+区别只在**状态存谁那**:
+
+| | 状态存在哪 | 谁来改 |
+|---|---|---|
+| 非受控组件 | 子组件内部(`const url = ref('')`) | 子组件自己 |
+| **受控组件**(本例) | **父组件** AddPicturePage 里 | **父组件**改,子组件只负责"显示 + 触发" |
+
+PictureUpload 自己**不存**当前图片状态,而是从 `props.picture` 读(模板里 `picture?.url` 展示预览图);上传成功后也不自己改状态,而是调 `props.onSuccess(...)` 请父组件改。类比 HTML 的 `<input v-model="x">`:输入框自己不记值,值存在父组件的 `x` 里。
+
+### 三、第三层:两个页面到底怎么联动(核心)
+
+数据流是**单向数据流 + 回调通知**(Vue 父子通信的标准模式)。结合真实代码,完整链路如下:
+
+```
+┌──────────────────── 父:AddPicturePage.vue ────────────────────┐
+│                                                                │
+│  const picture = ref<API.PictureVO>()       ← 状态真正存在这里 │
+│                                                                │
+│  const onSuccess = (newPicture: API.PictureVO) => {           │
+│      picture.value = newPicture             ← 父组件负责改状态 │
+│  }                                                             │
+│                                                                │
+│   <PictureUpload :picture="picture" :onSuccess="onSuccess" /> │
+└───────────┬──────────────────────────────────────┬────────────┘
+            │  ① :picture="picture"                 │  ② :onSuccess="onSuccess"
+            │     数据向下(当前图片,用于预览)        │     函数向下(让子组件能反向叫一声)
+            ▼                                      ▼
+┌──────────────────── 子:PictureUpload.vue ─────────────────────┐
+│                                                                │
+│  props.picture           ← 读父组件给的图片(模板展示其 url)    │
+│                                                                │
+│  handleUpload (用户选文件 → a-upload 的 customRequest 触发):   │
+│    const params = props.picture ? {id: props.picture.id} : {}  │
+│    const res = await uploadPictureUsingPost(params, {}, file)  │
+│    if (res.data.code === 0 && res.data.data) {                 │
+│        props.onSuccess?.(res.data.data)   ← ③ 反向调用回调      │
+│    }                                                           │
+│         │                                                      │
+│         └──→ 实际执行的是父组件里的 onSuccess 函数              │
+│              → picture.value = newPicture      ④ 状态更新      │
+│              → 响应式触发:PictureUpload 重新渲染               │
+│              → 模板里 picture?.url 变成刚上传的新图片           │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+```
+
+#### 联动四步(对照代码行)
+
+1. **父持有状态**:`const picture = ref<API.PictureVO>()`([AddPicturePage.vue:11](src/pages/AddPicturePage.vue#L11))——初始为 `undefined`。
+2. **父把"数据"和"函数"都传下去**:`<PictureUpload :picture="picture" :onSuccess="onSuccess" />`([:3](src/pages/AddPicturePage.vue#L3))。两个 `:` 是 `v-bind:` 的简写。
+3. **子在上传成功后反向调用回调**:`props.onSuccess?.(res.data.data)`([PictureUpload.vue](src/components/PictureUpload.vue) 的 handleUpload 里)。`?.` 是可选链——万一父组件没传 `onSuccess`,这里静默跳过不报错。
+4. **回调实际是父的函数,改的是父的状态**:`picture.value = newPicture`([AddPicturePage.vue:13](src/pages/AddPicturePage.vue#L13))。改完因为是响应式 `ref`,子组件读到的 `props.picture` 自动更新,预览图刷新——**无需任何手动通知**。
+
+> 一句话:**数据向下(`:prop`)、事件向上(`props.回调()`)**,闭环。子组件始终不拥有状态,只是"显示器 + 触发器"。
+
+### 四、template 里的 a-upload 怎么用
+
+```vue
+<a-upload
+  list-type="picture-card"
+  :show-upload-list="false"
+  :customRequest="handleUpload"
+  :before-upload="beforeUpload"
+>
+```
+
+| 属性 | 作用 |
+|---|---|
+| `list-type="picture-card"` | 上传区域显示成「卡片样式」(带边框的方框) |
+| `:show-upload-list="false"` | 不显示下方默认的文件列表(因为本例用自定义预览) |
+| `:customRequest="handleUpload"` | **覆盖默认上传行为**,把上传逻辑交给我们的 `handleUpload`。否则 a-upload 会用自己的内置请求,我们没法塞自定义参数 |
+| `:before-upload="beforeUpload"` | 上传**前**的钩子,返回 `false` 会中止上传。这里用来做格式/大小校验 |
+
+**模板的 `v-if` 渲染逻辑**(三种状态):
+
+```vue
+<img v-if="picture?.url" :src="picture?.url" />   <!-- 已有图片:显示预览 -->
+<div v-else>
+  <loading-outlined v-if="loading" />             <!-- 上传中:转圈 -->
+  <plus-outlined v-else />                        <!-- 空闲:加号 -->
+  <div class="ant-upload-text">点击或拖拽上传图片</div>
+</div>
+```
+
+> 注意:`handleUpload = async ({file}: any) => {...}` 解构出 `file`。这个 `file` 是 a-upload 传给 customRequest 的参数对象里的字段(实际是 `UploadFile` 包装对象),不是浏览器原始 `File`,所以这里暂时用 `any`。而 `beforeUpload` 拿到的 `file` 是原始 `File`(见下一节的坑)。
+
+### 五、style 语法(scoped / `:deep()` / `!important`)
+
+```css
+.picture-upload :deep(.ant-upload) {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 152px;
+  min-height: 152px;
+}
+```
+
+三个关键语法点,逐个讲:
+
+#### 1. `<style scoped>` —— 作用域隔离
+
+`scoped` 让样式**只作用于当前组件**。原理:Vue 编译时给当前组件的每个元素加一个唯一属性(如 `data-v-a1b2c3d4`),同时把 CSS 选择器也改写带上这个属性:
+
+```css
+/* 你写的 */            .picture-upload img { ... }
+/* 编译后 */            .picture-upload img[data-v-a1b2c3d4] { ... }
+```
+
+好处是不会污染全局;副作用是——**选不到子组件内部、或组件库内部渲染的元素**(它们没有这个 `data-v` 属性)。
+
+#### 2. `:deep(.ant-upload)` —— 穿透 scoped 的深度选择器
+
+`.ant-upload` 是 ant-design-vue 在组件**内部**渲染的元素,它没有当前组件的 `data-v` 属性。如果直接写 `.picture-upload .ant-upload`,编译后会带上 `[data-v-xxx]` 而选不中。
+
+`:deep()` 就是解决这个的——告诉 Vue「括号里的选择器要穿透到子组件/组件库内部」:
+
+```css
+/* 你写的 */            .picture-upload :deep(.ant-upload) { ... }
+/* 编译后 */            .picture-upload[data-v-a1b2c3d4] .ant-upload { ... }
+/*                       ↑ data-v 只挂在 .picture-upload 上,.ant-upload 不带,所以能选中 */
+```
+
+> 凡是要改 ant-design-vue 这类组件库内部元素的样式,基本都要套一层 `:deep()`。
+
+#### 3. `!important` —— 提权覆盖组件库默认值
+
+ant-design-vue 给 `.ant-upload`(picture-card 模式)设了固定的宽高。我们的 `width:100%` 想铺满父容器,但**优先级不够**盖不过它,所以加 `!important` 强行提权。`!important` 是「最后手段」,能用特异性解决就别滥用。
+
+#### 4. 其余规则
+
+- `.picture-upload img { max-width/height }`:限制预览图大小,防止大图撑爆卡片。
+- `.ant-upload-select-picture-card i / .ant-upload-text`:调加号图标和提示文字的字号、颜色——这俩选择器没套 `:deep()` 其实是**选不中的**(同 scoped 原理),属于遗留/兜底写法,不影响主功能。
+
+### 六、上传请求的三个参数:params / body / file 分工
+
+这是最易混淆的一处。看 [pictureController.ts](src/api/pictureController.ts) 里 `uploadPictureUsingPost(params, body, file)` 的实现,**三个参数走的是三条独立的路**:
+
+| 参数 | 放在哪里 | controller 怎么处理 | 本例传的值 | 后端接收 |
+|---|---|---|---|---|
+| `params`(第1) | **URL 查询字符串** | `params: {...params}` 拼到 URL(`?id=123`) | `{id}` 或 `{}` | **`PictureUploadRequest`**(见第七节) |
+| `body`(第2) | **FormData 的额外字段** | 遍历后 `formData.append(...)` | `{}` | (不对应,空着) |
+| `file`(第3) | **FormData 的 file 部分** | `formData.append('file', file)` | 用户选的文件 | `@RequestPart("file") MultipartFile` |
+
+所以「**文件根本不走 params,而是走第三个参数 file**」:
+
+```
+uploadPictureUsingPost(params, {}, file)
+        │              │     │
+        │              │     └─→ formData.append('file', file)  → multipart 请求体的 file 部分 ← 文件在这!
+        │              └─→ FormData 额外字段(本例没有)
+        └─→ URL query string(?id=xxx)
+```
+
+- **`params = {}` 时文件照样传**:只是 URL 不挂 `id`,文件照常经 `file` 参数走 FormData 上传。
+- **axios 的 `params` vs `data`**:`params` 拼 URL 查询串(GET 习惯),`data` 放请求体(POST 用)。文件用 `data: formData`。
+
+### 七、前后端对接:后端的 `PictureUploadRequest` 从哪来
+
+> 困惑:前端 `body` 传的是空对象 `{}`,后端接口却要一个 `PictureUploadRequest`,这怎么对得上?
+
+**对得上——`PictureUploadRequest` 不是从前端 `body` 来的,而是从前端 `params`(URL query)来的。** 看后端接口签名 [PictureController.java](../cc-picture-backend/src/main/java/com/zjcc/ccpicturebackend/controller/PictureController.java):
+
+```java
+public BaseResponse<PictureVO> uploadPicture(
+        @RequestPart("file") MultipartFile multipartFile,   // ← 文件
+        PictureUploadRequest pictureUploadRequest,           // ← 无任何注解!
+        HttpServletRequest request)
+```
+
+`PictureUploadRequest` 这个参数**没有 `@RequestBody`、没有 `@RequestParam`、什么注解都没有**。Spring MVC 对无注解的 POJO,默认行为是:**从 URL query 参数(和 form 普通字段)按字段名绑定**到对象上。于是它会从 `?id=123&picName=xxx` 里取值填进去。
+
+而 OpenAPI 文档(Knife4j)把这个无注解 POJO 识别成一组 query 参数,前端生成器就把它们收拢进了 `uploadPictureUsingPOSTParams`。对比两边字段——**5 个一模一样**:
+
+| 前端 `uploadPictureUsingPOSTParams` | 后端 `PictureUploadRequest` |
+|---|---|
+| `fileUrl?` | `String fileUrl` |
+| `id?` | `Long id` |
+| `picColor?` | `String picColor` |
+| `picName?` | `String picName` |
+| `spaceId?` | `Long spaceId` |
+
+完整对应关系:
+
+| 前端参数 | HTTP 怎么传 | 后端接收 |
+|---|---|---|
+| `params` | URL query string | **`PictureUploadRequest`** |
+| `file` | FormData 的 file 部分 | `@RequestPart("file") MultipartFile` |
+| `body={}` | FormData 普通字段 | (空着,不对应任何后端参数) |
+
+所以 `body: {}` 是 openapi 模板**预留的「额外 form 字段」槽位**,本例没东西可放就传空,它跟 `PictureUploadRequest` 毫无关系。
+
+### 八、DTO 设计:为什么 `PictureUploadRequest` 有这么多字段
+
+> 疑问:更新图片明明只需要一个 `id`,为什么 DTO 还要 `fileUrl/picName/spaceId/picColor`?
+
+因为 **`PictureUploadRequest` 不是「更新专用」的,它是「上传图片」这个业务动作的通用请求对象,一个类服务多个场景**。每个字段各管一摊(均有 service 层代码佐证):
+
+| 字段 | 服务的场景 |
+|---|---|
+| `id` | **更新图片**(换文件、保留老记录)——service 里据此判断新增还是更新 |
+| `spaceId` | **上传到指定空间**(私人/团队空间,而非公共图库)——service 里校验空间是否存在 |
+| `picName` | **自定义图片名**(默认用文件名,可手动覆盖;批量上传时自动生成「前缀+序号」) |
+| `fileUrl` | **URL 上传**(另一个接口 `uploadPictureByUrl` 用,不传文件传地址) |
+| `picColor` | **图片主色调**(扩展字段,留给按颜色搜索等场景) |
+
+**核心认知:DTO 字段是「能力声明」,不是「必填清单」。** 这次更新只传 `{id}`,是因为这次只换文件;但哪天要「换文件同时改名」,因为有 `picName` 字段,前端多传一个就行,DTO 和接口都不用改。字段多 ≠ 每次都要填,字段多是给「未来的可能性」留口子。这是「胖 DTO 复用」与「拆多个小 DTO」的工程权衡,本项目选了前者。
+
+### 九、踩过的三个坑
+
+#### 坑 1:`res.data.code` 报「类型 `T` 上不存在属性 `code`」
+
+**现象**:`if (res.data.code === 0 && res.data.data)` 整行报 `Property 'code' does not exist on type 'T'`,连带 `data`/`message` 全报。但 [useLoginUserStore.ts](src/stores/useLoginUserStore.ts) 里一模一样的写法却不报。
+
+**根因**:病根不在这一行,而在生成的 [pictureController.ts](src/api/pictureController.ts) 里有 `requestType: 'form'`——它不是 `AxiosRequestConfig` 的合法字段,触发 TS2353(excess property),**连带**让 `uploadPictureUsingPost` 的返回类型泛型推断崩坏,`res.data`(本是 `AxiosResponse.data`,类型就是泛型 `T`)退化成裸 `T`。而 `getLoginUserUsingGet` 的 controller 没有 `requestType`,所以不报。
+
+**修复**:新建 [axios-augment.d.ts](src/axios-augment.d.ts),用 TS 的**模块增强**给 axios 补上这个字段:
+
+```ts
+import 'axios'
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    requestType?: 'form' | 'json' | 'multipart'
+  }
+}
+```
+
+从源头消除 TS2353,泛型推断恢复正常,`res.data.code` 自然不报。业务代码一行没动。
+
+#### 坑 2:`beforeUpload` 报 TS2537
+
+**现象**:`(file: UploadProps['fileList'][number])` 报「`UploadFile[] | undefined` 没有 number 索引签名」。
+
+**根因**:`UploadProps['fileList']` 类型是 `UploadFile[] | undefined`(可能为 undefined),对它取 `[number]` 本身就是有缺陷的写法。而 ant-design-vue 的 `beforeUpload` 真实参数类型其实是 `FileType`(继承自 `File`)。
+
+**修复**:直接用原生 `File` 类型(代码只用到 `file.type`、`file.size`,都有),顺手删掉不再使用的 `UploadProps`/`UploadChangeParam` import:
+
+```ts
+const beforeUpload = (file: File) => { ... }
+```
+
+#### 坑 3:`catch` 块警告 "Handle this exception or don't catch it at all"
+
+**现象**:`catch(error)` 接住了异常,但 `error` 从头到尾没用,只 `message.error('图片上传失败')`。IDE 认为「要么真处理,要么别 catch」。
+
+**修复**:把 `error` 用起来,显示真实错误原因:
+
+```ts
+} catch (error: any) {
+  message.error('图片上传失败：' + (error?.message ?? ''))
+}
+```
+
+- `error: any`:TS 严格模式下 catch 的 error 默认是 `unknown`,访问 `.message` 会报错,标 `any` 绕过。
+- `error?.message`:可选链防空指针。
+- `?? ''`:空合并,防止显示难看的 `"undefined"`。
+
+> try 里两个分支的分工要分清:**`else` 分支**是「请求成功到达后端、但业务失败(`code != 0`)」,显示 `res.data.message`(后端中文提示);**`catch` 分支**是「请求根本没成功」(断网/超时/HTTP 500),显示 `error.message`(技术原因,如 `Network Error`)。
+
+### 十、`requestType` 的来源 + 为什么教程不用补类型
+
+**来源**:[openapi.config.js](openapi.config.js) 用 `@umijs/openapi` 生成 controller,它的模板 `serviceController.njk` 里有一段:
+
+```nunjucks
+{%- if api.body.mediaType === "multipart/form-data" %}
+requestType: 'form',
+{%- endif %}
+```
+
+即:**只要接口是 `multipart/form-data`(带文件上传),模板就输出 `requestType: 'form'`**。链路是:后端 `MultipartFile` 参数 → OpenAPI 文档标记为 multipart → 生成器命中模板分支 → 产出 `requestType: 'form'`。
+
+**为什么教程(鱼皮)不用补类型?** 因为 `requestType` 报不报错,**取决于 axios 版本**:
+
+| | 教程(不报) | 本项目(报) |
+|---|---|---|
+| axios | **^1.7.9** | **^1.18.1** |
+| `AxiosRequestConfig` 是否有 `[key: string]: any` 兜底 | **有**(宽松,放行任意字段) | **没有**(严格列举,多余字段报 TS2353) |
+| `request.ts` 封装 | 裸 axios 实例 | 一模一样 |
+| controller 是否有 `requestType` | 有 | 有 |
+
+axios 在 1.7.9 → 1.18.1 之间**收紧了 `AxiosRequestConfig` 类型**(移除了 index signature),旧版宽松正好绕过这个问题,新版严格就暴露了。所以补类型是针对新版 axios 的正确应对,不是写法有问题——而且 `axios-augment.d.ts` 这种**模块增强**正是 TS 官方处理「第三方库类型缺字段」的推荐做法。⚠️ 不要为了这个降级 axios,也不要直接删 controller 里的 `requestType`(会被 `npm run openapi` 重新生成覆盖)。
+
+### 十一、概念小结
+
+| 概念 | 在本组件的体现 |
+|---|---|
+| **`defineProps<Props>()`** | 基于类型的 props 声明,既传数据(`picture`)又传函数(`onSuccess`) |
+| **受控组件** | 状态存父组件,子组件只读 + 触发回调 |
+| **单向数据流 + 回调** | `:prop` 向下、`props.回调()` 向上 |
+| **可选链 `?.`** | `props.onSuccess?.()`、`picture?.url`、`error?.message` |
+| **空合并 `??`** | `error?.message ?? ''` 防 undefined |
+| **`<style scoped>` + `:deep()`** | 作用域隔离 + 穿透到组件库内部元素 |
+| **axios `params` vs `data`** | query 参数 vs 请求体;文件走 FormData(`data`) |
+| **multipart 三参数** | params→URL query、body→额外 form 字段、file→文件 |
+| **无注解 POJO 绑定** | 后端 `PictureUploadRequest` 从 URL query 按字段名绑定 |
+| **胖 DTO** | 一个类服务多场景,字段是「能力声明」非「必填清单」 |
+| **模块增强 `declare module`** | 给 axios 补 `requestType` 字段,治本不动生成代码 |
+
+### 十二、一句话总结
+
+> PictureUpload 是个**受控组件**:状态(`picture`)存在父组件 AddPicturePage,父用 `:picture` 把数据传下来给子组件预览,子组件上传成功后用 `props.onSuccess?.(...)` 把新图片传回去,父更新状态、响应式自动刷新预览——**数据向下、事件向上**。一次上传请求里,文件走 `file`(FormData)、`id` 走 `params`(URL query,对应后端无注解的 `PictureUploadRequest`)、`body` 是预留空槽;而 `requestType: 'form'` 的类型报错,根子在 axios 新版收紧了类型,用一份 `axios-augment.d.ts` 模块增强从源头治好。
+
+---
