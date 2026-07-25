@@ -1821,3 +1821,131 @@ Windows 命令行长度上限约 **32KB**。IDEA 启动 Java 应用时,会把**�
 
 > **一句话:jar 太多 → IDEA 拼的 `java -cp` 命令行超过 Windows 32KB 上限 → 去 Edit Configurations 把 Shorten command line 改成 JAR manifest,用临时 jar 承载 classpath 绕过限制,项目就能起来了。**
 
+---
+
+# 2026/07/25
+
+## 修改图片报「请求数据不存在」:雪花 id 撞上 JS Number 精度上限
+
+### 背景:复用创建页做"修改",却查不到图
+
+`AddPicturePage` 复用创建页做修改:URL 带 `?id=xx` 时进修改模式,`getOldPicture` 根据 id 调 `getPictureVoByIdUsingGet` 查回旧数据填表单。但访问 `/add_picture?id=2080910661127073794`(图明明在数据库),后端直接抛:
+
+```
+BusinessException: 请求数据不存在
+```
+
+第一反应怀疑"图片处于审核中(reviewStatus)被过滤了"——**这个方向完全错了**。
+
+---
+
+### 难点①:先排除"审核状态"这个红鲱鱼
+
+看后端 `PictureController.getPictureVOById`(`:180-185`):
+
+```java
+@GetMapping("/get/vo")
+public BaseResponse<PictureVO> getPictureVOById(long id, HttpServletRequest request) {
+    ThrowUtils.throwIf(id <= 0, ErrorCode.PARAMS_ERROR);
+    Picture picture = pictureService.getById(id);                    // 只按 id 查
+    ThrowUtils.throwIf(picture == null, ErrorCode.NOT_FOUND_ERROR);  // 查不到才抛"请求数据不存在"
+    ...
+}
+```
+
+`getById(id)` 是 MyBatis-Plus 按 id 查,**根本不看 reviewStatus**——审核中的图照样能查到。所以"请求数据不存在"只有一个原因:**传给后端的 id 查不到记录**。图在库里却查不到,说明**传过去的 id 不对**。
+
+> 教训:报"数据不存在"别急着归因到业务字段(审核/权限),先确认"传的 id 到底对不对"。
+
+---
+
+### 难点②:真凶——JS 大整数精度丢失(node 一行坐实)
+
+`2080910661127073794` 是雪花算法生成的 id,≈ 2×10¹⁸,远超 JS 安全整数上限 2⁵³ ≈ 9×10¹⁵。前端 `getOldPicture` 里这一行是罪魁:
+
+```ts
+const id = Number(route.query?.id)   // 字符串 → number,精度在这里丢了
+```
+
+用 node 直接验证(铁证):
+
+```
+URL里的id:     2080910661127073794
+Number()后:    2080910661127073800   ← 末尾 3794 变成 3800!
+精度是否丢失:  是 ❌
+```
+
+精度丢失链路:
+
+```
+route.query.id = "2080910661127073794"   (字符串,精确)
+        │ Number()
+        ▼
+id = 2080910661127073800                 (number,末尾错了)
+        │ 传给后端 getPictureVoById
+        ▼
+后端 getById(2080910661127073800) → 查不到(真实 id 是 ...3794)→ 抛"请求数据不存在"
+```
+
+---
+
+### 难点③:后端其实早就防了——Long→String 序列化
+
+`JsonConfig`(`:24-25`)配了:
+
+```java
+module.addSerializer(Long.class, ToStringSerializer.instance);
+module.addSerializer(Long.TYPE, ToStringSerializer.instance);  // 注释:解决前端 JS number 精度丢失
+```
+
+所有 `Long` 序列化成字符串返回。**设计上前端的 id 就该全程当字符串用**,根本不该 `Number()`。
+
+那为什么前端还是写了 `Number()`?因为 **openapi 生成的类型在"骗人"**——`typings.d.ts:235` 里 `getPictureVOByIdUsingGETParams.id?: number`(生成器只看 Java 字段是 `long`,不知道后端配了序列化)。类型说 id 是 number,前端为了把 query 的 string 塞进去,就顺手 `Number()` 了——**类型过了,运行时却把 id 改错了**。
+
+---
+
+### 为什么"创建成功、修改查不到"(对比秒懂)
+
+同一个项目、同一个 id,为什么创建图片(handleSubmit)没事,修改(getOldPicture)就翻车?
+
+| 流程 | id 怎么流转 | 转 Number 吗 | 结果 |
+|---|---|---|---|
+| 创建 handleSubmit | `picture.value?.id`(后端返回的**字符串**)→ 传给 editPicture | ❌ 不转,字符串原样走 | HTTP 传字符串 → 后端 long 精确解析 → ✅ 成功 |
+| 修改 getOldPicture | `route.query.id`(字符串)→ `Number()` → 传给 getPictureVoById | ✅ 转了,丢精度 | 传错 id → ❌ 查不到 |
+
+关键认知:**精度丢失只发生在前端 JS 的 `Number()` 转换,不在 HTTP 传输**(HTTP 传的是字符串,后端 Spring 把字符串精确解析成 long)。所以只要前端不转 Number、字符串走到底,就不会丢精度。handleSubmit 没转,所以没事;getOldPicture 转了,就翻车。
+
+---
+
+### 修复:id 全程字符串 + 类型断言
+
+去掉 `Number()`,保持字符串;类型冲突用断言绕过(**不是**用 Number 转换):
+
+```ts
+const getOldPicture = async () => {
+  // ⚠️ 不能用 Number():雪花 id 超过 JS 安全整数(2^53),会丢精度
+  // 后端已配置 Long→String 序列化(JsonConfig),id 全程保持字符串即可
+  const id = route.query?.id
+  if (id) {
+    const res = await getPictureVoByIdUsingGet({
+      // 运行时 id 是 string,但 openapi 生成的类型是 number,用断言绕过
+      id: id as unknown as number,
+    })
+    ...
+  }
+}
+```
+
+---
+
+### 经验教训
+
+1. **雪花/大整数 id 全程当字符串,绝不 `Number()`**:超过 2⁵³ 的数 JS Number 存不下,一转就丢精度,而且**静默丢精度**(不报错,末尾几位变了),极难发现。
+2. **后端 `Long→String` 序列化的意义就在这**:从源头让前端拿到字符串 id,避开 JS 精度坑。配了它,前端就该全程字符串。
+3. **类型正确 ≠ 运行时正确**:`Number()` 让 TS 闭嘴了(string 变 number,类型对上了),却悄悄改错了值。TS 查的是"形状对不对",查不了"数值精度对不对"。
+4. **openapi 生成的类型可能"骗你"**:后端 Java 是 `long`、又配了序列化,openapi 文档仍写成 `number`(生成器不知道序列化配置)。遇到大 id 的类型冲突,**断言绕过**(`as unknown as number`),**不要转换**(`Number()`)。
+5. **排查技巧:F12 Network 看请求参数**:报"数据不存在"时,直接看请求 URL 上的 id 末尾和数据库对不对——`?id=...3800` vs 真实 `...3794`,一眼看出精度丢了。
+6. **URL query 要带 key**:`?id=xxx` 才能让 `route.query.id` 取到值;写成 `?xxx`(缺 `id=`)则 `route.query.id` 是 undefined,请求根本不发——这是另一个独立坑。
+
+> **一句话:雪花 id 超过 JS Number 精度上限,前端 `Number(route.query.id)` 把 ...3794 转成了 ...3800,传给后端查不到 → 报"请求数据不存在";根因不是审核,是精度丢失。后端早配了 Long→String,前端 id 该全程字符串,遇到 openapi 的 number 类型用断言绕过、别用 Number 转换。**
+
