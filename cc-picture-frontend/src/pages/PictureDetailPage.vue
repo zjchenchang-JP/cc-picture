@@ -65,6 +65,12 @@
               </template>
             </a-button>
           </a-space>
+          <a-button type="primary" @click="doDownload">
+            免费下载
+            <template #icon>
+              <DownloadOutlined />
+            </template>
+          </a-button>
         </a-card>
       </a-col>
     </a-row>
@@ -74,15 +80,13 @@
 <script setup lang="ts">
 import {
   deletePictureUsingPost,
-  getPictureVoByIdUsingGet,
-  listPictureTagCategoryUsingGet,
-  listPictureVoByPageUsingPost
+  getPictureVoByIdUsingGet
 } from '@/api/pictureController'
 import { message, Modal } from 'ant-design-vue'
 import { ExclamationCircleOutlined } from '@ant-design/icons-vue'
 import { computed, h, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { formatSize } from '@/utils'
+import { downloadImage, formatSize } from '@/utils'
 import { useLoginUserStore } from '@/stores/useLoginUserStore'
 
 // 图片详情⁡⁡⁡页要展示的图片是根据 ⁠⁠⁠id 而变化的，使用动态路由。
@@ -168,8 +172,13 @@ const doDelete = () => {
       } catch (e: any) {
         message.error('删除失败：' + (e?.message ?? ''))
       }
-    },
+    }
   })
+}
+
+// 图片下载
+const doDownload = () => {
+  downloadImage(picture.value.url, picture.value.name)
 }
 
 onMounted(() => {
