@@ -1,6 +1,15 @@
 <template>
   <div id="homePage">
-    <!-- <h1>{{ msg }}</h1> -->
+    <!-- 搜索框 -->
+    <div class="search-bar">
+      <a-input-search
+        placeholder="从海量图片中搜索"
+        v-model:value="searchParams.searchText"
+        enter-button="搜索"
+        size="large"
+        @search="doSearch"
+      />
+    </div>
     <!-- 图片展示列表 -->
     <a-list
       :grid="{ gutter: 16, xs: 1, sm: 2, md: 3, lg: 4, xl: 5, xxl: 6 }"
@@ -92,9 +101,19 @@ const pagination = computed(() => {
 onMounted(() => {
   fetchData()
 })
+
+
+// 搜索
+const doSearch = () => {
+  // 重置搜索条件
+  searchParams.current = 1
+  fetchData()
+}
 </script>
 
 <style scoped>
-#homePage {
+#homePage .search-bar {
+  max-width: 480px;
+  margin: 0 auto 16px;
 }
 </style>
