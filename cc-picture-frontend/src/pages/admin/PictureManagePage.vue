@@ -1,5 +1,9 @@
 <template>
   <div id="pictureManagePage">
+    <a-flex justify="space-between">
+      <h2>图片管理</h2>
+      <a-button type="primary" href="/add_picture" target="_blank" >+ 创建图片</a-button>
+    </a-flex>
     <!-- 搜索表单 -->
     <a-form layout="inline" :model="searchParams" @finish="doSearch">
       <a-form-item label="关键词" name="searchText">
@@ -31,6 +35,7 @@
     </a-form>
     <div style="margin-bottom: 16px" />
     <!-- 表格 -->
+    <!--  :scroll="{ x: 'max-content' }" 横向滚动属性 -->
     <a-table
       :columns="columns"
       :data-source="dataList"
@@ -65,9 +70,8 @@
           {{ dayjs(record.editTime).format('YYYY-MM-DD HH:mm:ss') }}
         </template>
         <template v-else-if="column.key === 'action'">
-          <a-button type="link" danger @click="doDelete(record.id)"
-            >删除</a-button
-          >
+          <a-button type="link" :href="`/add_picture?id=${record.id}`" target="_blank">编辑</a-button>
+          <a-button type="link" danger @click="doDelete(record.id)" >删除</a-button>
         </template>
       </template>
     </a-table>
@@ -77,12 +81,11 @@
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import {
-  deleteUserUsingPost,
-  listUserVoByPageUsingPost
-} from '@/api/userController.ts'
 import dayjs from 'dayjs'
-import { listPictureByPageUsingPost } from '@/api/pictureController'
+import {
+  deletePictureUsingPost,
+  listPictureByPageUsingPost
+} from '@/api/pictureController'
 
 const columns = [
   {
@@ -133,9 +136,11 @@ const columns = [
     key: 'action'
   }
 ]
-
+/**
+ * 删除图片
+ */
 const doDelete = async (id: number) => {
-  const res = await deleteUserUsingPost({ id })
+  const res = await deletePictureUsingPost({ id })
   console.log('res', res)
   if (res.data.code === 0) {
     message.success('删除成功')
