@@ -8,3 +8,7 @@
 ### OS ###
 .DS_Store
 Thumbs.db
+
+### Claude Code ###
+# 本地个人设置（含本机绝对路径等，不入库）；团队共享配置放 settings.json
+.claude/settings.local.json
