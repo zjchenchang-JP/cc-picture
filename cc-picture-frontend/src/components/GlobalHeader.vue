@@ -92,6 +92,11 @@ const originItems = ref<MenuProps['items']>([
     title: '图片管理'
   },
   {
+    key: '/admin/spaceManage',
+    label: '空间管理',
+    title: '空间管理',
+  },
+  {
     key: 'others',
     label: h(
       'a',
@@ -101,7 +106,7 @@ const originItems = ref<MenuProps['items']>([
     title: 'Author Github'
   }
 ])
-// 权限控制 非admin不应该看见 ‘用户管理’ 菜单
+// 权限控制 未登录 or 非admin不应该看见 ‘用户管理’ 菜单
 // 过滤菜单项
 const filterMenus = (menus = [] as MenuProps['items']) => {
   return menus?.filter(menu => {

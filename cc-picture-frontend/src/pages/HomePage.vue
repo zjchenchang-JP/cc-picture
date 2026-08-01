@@ -49,6 +49,10 @@
             <template #cover>
               <!-- object-fit: cover 优化图片的展示效果，不会受到挤压 -->
               <!-- 图片的宽高都是不同的，为了防止页面 “参差不齐”，给所有图片统一设置相同的高度 -->
+              <!-- 性能优化 展示缩略图 懒加载
+                :src="picture.thumbnailUrl ?? picture.url"
+                loading="lazy"
+              -->
               <img
                 style="height: 150px; object-fit: cover"
                 :alt="pictureVo.name"
