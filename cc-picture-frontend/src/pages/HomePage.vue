@@ -34,48 +34,16 @@
         </a-checkable-tag>
       </a-space>
     </div>
-    <!-- 图片展示列表 -->
-    <a-list
-      :grid="{ gutter: [0,0], xs: 1, sm: 2, md: 3, lg: 4, xl: 5, xxl: 6 }"
-      :data-source="dataList"
-      :pagination="pagination"
-      :loading="loading"
-    >
-      <template #renderItem="{ item: pictureVo }">
-        <a-list-item>
-          <!-- 单张图片 -->
-          <!-- 图片卡片绑定点击事 -->
-          <a-card hoverable @click="doClickPicture(pictureVo)" >
-            <template #cover>
-              <!-- object-fit: cover 优化图片的展示效果，不会受到挤压 -->
-              <!-- 图片的宽高都是不同的，为了防止页面 “参差不齐”，给所有图片统一设置相同的高度 -->
-              <!-- 性能优化 展示缩略图 懒加载
-                :src="picture.thumbnailUrl ?? picture.url"
-                loading="lazy"
-              -->
-              <img
-                style="height: 150px; object-fit: cover"
-                :alt="pictureVo.name"
-                :src="pictureVo.url"
-              />
-            </template>
-            <a-card-meta :title="pictureVo.name">
-              <template #description>
-                <!-- <a-flex wrap="wrap" :gap="8"> -->
-                <a-flex >
-                  <a-tag color="green">
-                    {{ pictureVo.category ?? '默认' }}
-                  </a-tag>
-                  <a-tag v-for="tag in pictureVo.tags" :key="tag">
-                    {{ tag }}
-                  </a-tag>
-                </a-flex>
-              </template>
-            </a-card-meta>
-          </a-card>
-        </a-list-item>
-      </template>
-    </a-list>
+    <!-- 图片展示列表 使用自定义组件 -->
+    <PictureList :dataList="dataList" :loading="loading" />
+    <!-- 分页 -->
+    <a-pagination
+      style="text-align: right"
+      v-model:current="searchParams.current"
+      v-model:pageSize="searchParams.pageSize"
+      :total="total"
+      @change="onPageChange"
+    />
   </div>
 </template>
 
@@ -84,6 +52,7 @@ import { listPictureTagCategoryUsingGet, listPictureVoByPageUsingPost } from '@/
 import { message } from 'ant-design-vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import PictureList from '@/components/PictureList.vue' // 定义数据
 // const msg = '欢迎来到CC-Picture，开启图库~'
 
 // 数据源
@@ -151,6 +120,13 @@ onMounted(() => {
   fetchData()
   getTagCategoryOptions()
 })
+
+// 分页参数
+const onPageChange = (page: number, pageSize: number) => {
+  searchParams.current = page
+  searchParams.pageSize = pageSize
+  fetchData()
+}
 
 // 搜索
 const doSearch = () => {

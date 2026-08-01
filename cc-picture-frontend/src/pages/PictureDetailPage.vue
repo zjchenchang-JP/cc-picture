@@ -64,13 +64,13 @@
                 <DeleteOutlined />
               </template>
             </a-button>
+            <a-button type="primary" @click="doDownload">
+              免费下载
+              <template #icon>
+                <DownloadOutlined />
+              </template>
+            </a-button>
           </a-space>
-          <a-button type="primary" @click="doDownload">
-            免费下载
-            <template #icon>
-              <DownloadOutlined />
-            </template>
-          </a-button>
         </a-card>
       </a-col>
     </a-row>
