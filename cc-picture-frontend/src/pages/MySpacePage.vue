@@ -31,6 +31,9 @@ const checkUserSpace = async () => {
   if (res.data.code === 0) {
     // 如果用户已登录，会获取该用户已创建的空间
     // 如果有，则进入第一个空间
+    // TODO 待优化用户有多个空间时 凭什么就是私人空间？？
+    // spaceType: 0 只查私人空间 → 用户从这个入口永远进不去团队空间；
+    // 如果不加过滤、只取 records[0] → 团队空间"偶尔能进"，但全靠数据库排序的巧合，不可控
     // .replace 重定向页面，这样点击浏览器的后退按钮时，不会回到中间页
     const records = res.data.data?.records ?? []
     if (records.length > 0) {

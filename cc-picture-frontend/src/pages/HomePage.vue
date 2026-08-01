@@ -50,8 +50,7 @@
 <script setup lang="ts">
 import { listPictureTagCategoryUsingGet, listPictureVoByPageUsingPost } from '@/api/pictureController'
 import { message } from 'ant-design-vue'
-import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { onMounted, reactive, ref } from 'vue'
 import PictureList from '@/components/PictureList.vue' // 定义数据
 // const msg = '欢迎来到CC-Picture，开启图库~'
 
@@ -100,21 +99,6 @@ const fetchData = async () => {
   loading.value = false
 }
 
-// 分页参数
-const pagination = computed(() => {
-  return {
-    current: searchParams.current ?? 1,
-    pageSize: searchParams.pageSize ?? 10,
-    total: total.value,
-    // 切换页号 页面size时,实时修改搜索参数并获取数据
-    onChange: (page: number, pageSize: number) => {
-      searchParams.current = page
-      searchParams.pageSize = pageSize
-      fetchData()
-    }
-  }
-})
-
 // 页面加载时请求数据
 onMounted(() => {
   fetchData()
@@ -151,8 +135,6 @@ const onTagChange = (tag: string, checked: boolean) => {
   doSearch()
 }
 
-
-
 // 获取标签和分类选项
 const getTagCategoryOptions = async () => {
   const res = await listPictureTagCategoryUsingGet()
@@ -164,18 +146,6 @@ const getTagCategoryOptions = async () => {
     message.error('加载分类标签失败，' + res.data.message)
   }
 }
-
-/**
- * 跳转到图片详情页
- */
-const router = useRouter()
-// 跳转至图片详情
-const doClickPicture = (pictureVo: { id: any }) => {
-  router.push({
-    path: `/picture/${pictureVo.id}`,
-  })
-}
-
 
 </script>
 
