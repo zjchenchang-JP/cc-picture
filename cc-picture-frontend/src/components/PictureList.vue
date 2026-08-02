@@ -34,6 +34,18 @@
                 </a-flex>
               </template>
             </a-card-meta>
+            <!-- 空间详情页的图片卡片的下方增加快捷操作栏 -->
+            <!-- 本⁡⁡⁡组件是主页和空间详情⁠⁠⁠页公用的，主页不需要展示操作栏、私有空间​​​才展示，所以需要使用⁠⁠⁠ showOp 属性来控制 -->
+            <template v-if="showOp" #actions>
+              <a-space @click="(e) => doEdit(picture, e)">
+                <EditOutlined />
+                编辑
+              </a-space>
+              <a-space @click="(e) => doDelete(picture, e)">
+                <DeleteOutlined />
+                删除
+              </a-space>
+            </template>
           </a-card>
         </a-list-item>
       </template>
@@ -43,16 +55,22 @@
 
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
+import { DeleteOutlined, EditOutlined } from '@ant-design/icons-vue'
+import { deletePictureUsingPost } from '@/api/pictureController'
+import { message } from 'ant-design-vue'
 
 // 定义属性，接受 data​​​List 数据列表和 l⁠⁠⁠oading 加载状态
 interface Props {
   dataList?: API.PictureVO[]
   loading?: boolean
+  showOp?: boolean
+  onReload: () => void
 }
 
 const props = withDefaults(defineProps<Props>(), {
   dataList: () => [],
   loading: false,
+  showOp: false,
 })
 
 // 跳转至图片详情
@@ -62,6 +80,37 @@ const doClickPicture = (picture) => {
     path: `/picture/${picture.id}`,
   })
 }
+
+// 快捷操作栏 编辑
+const doEdit = (picture, e) => {
+  // 用 e.stopPropagation 阻止事件传播
+  // 否则会同时触发卡片点击事件，跳转到图片详情页
+  e.stopPropagation()
+  router.push({
+    path: '/add_picture',
+    query: {
+      id: picture.id,
+      spaceId: picture.spaceId,
+    },
+  })
+}
+
+// 快捷操作栏 删除
+const doDelete = async (picture, e) => {
+  e.stopPropagation()
+  const id = picture.id
+  if (!id) return
+  const res = await deletePictureUsingPost({ id })
+  if (res.data.code === 0) {
+    message.success('删除成功')
+    // 回调通知外层组件 刷新数据
+    props?.onReload()
+  } else {
+    message.error('删除失败')
+  }
+}
+
+
 </script>
 
 <style scoped></style>
