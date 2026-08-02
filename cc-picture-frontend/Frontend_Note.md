@@ -2839,3 +2839,655 @@ const user = picture.value.user ?? {}
 > `picture.value.user || {}` 在 user 不存在时把变量兜底成空对象 `{}`(不是 undefined),所以 `user.id` 安全地得到 undefined(访问对象不存在的属性不报错),`loginUser.id === undefined` 正常返回 false(不可编辑);`||` 和 `??` 在兜底对象时结果完全一样,差别只在 `||` 会把 0/''/false 也当空值吞掉、而 `??` 只认 null/undefined——所以兜底对象两者都行,兜底数字/字符串/布尔必须用 `??`,养成用 `??` 的习惯更安全。
 
 ---
+
+# 2026/08/01
+
+## 自定义封装组件 PictureList:从「父子通信」到「子组件自己跳路由」,附 params / query / props 横向对比
+
+> 问题缘起:把首页 [HomePage.vue](src/pages/HomePage.vue) 那一大坨图片列表渲染逻辑抽成了 [PictureList.vue](src/components/PictureList.vue) 组件,并在空间详情页 [SpaceDetailPage.vue](src/pages/SpaceDetailPage.vue) 复用。一连串疑问——
+> 1. 一个 `.vue` 文件怎么「变成」能在别的页面里用的组件?`import` 进来还要不要像 Vue 2 那样手动注册?
+> 2. `withDefaults(defineProps<Props>(), {...})` 和之前 [PictureUpload.vue](src/components/PictureUpload.vue) 用的裸 `defineProps<Props>()` 有啥区别?默认值为什么写成 `() => []` 这种**函数**,不能直接写 `[]`?
+> 3. `:dataList="dataList"` 这两个 `dataList` 是同一个吗?子组件模板里为什么能直接写 `dataList`、不用加 `props.` 前缀?
+> 4. 点图片跳详情的 `router.push` 写在**子组件** PictureList 里,它怎么拿到路由实例的?`useRouter` 和 `useRoute` 又啥区别?
+> 5. [SpaceDetailPage.vue:95](src/pages/SpaceDetailPage.vue#L95) 的 `props.id` 和那条注释里的 `route.query?.id` 到底啥区别?为什么换 query 会拿不到值?
+>
+> 这篇笔记把「封装一个展示型组件」整条链子串起来:从引入、props、父子数据流,到子组件内部跳路由,最后横向对比 params / query / props 三套参数。涉及 `props: true` 机制和雪花 id 断言的部分,前文已讲透(见「图片详情页路由传参」「雪花 id 精度陷阱」两篇),这里只引用不重复。
+
+### 附:相关源码
+
+#### PictureList.vue(子组件 / 展示型组件,全文)
+
+```vue
+<!-- 封装图片列表组件 PictureList
+     该组件只负责数据的展示、不负责数据的查询,因此要把分页组件单独拉出来 -->
+<template>
+  <div class="picture-list">
+    <a-list
+      :grid="{ gutter: 16, xs: 1, sm: 2, md: 3, lg: 4, xl: 5, xxl: 6 }"
+      :data-source="dataList"
+      :loading="loading"
+    >
+      <template #renderItem="{ item: picture }">
+        <a-list-item style="padding: 0">
+          <a-card hoverable @click="doClickPicture(picture)">
+            <template #cover>
+              <img
+                style="height: 180px; object-fit: cover"
+                :alt="picture.name"
+                :src="picture.url"
+                loading="lazy"
+              />
+            </template>
+            <a-card-meta :title="picture.name">
+              <template #description>
+                <a-flex>
+                  <a-tag color="green">{{ picture.category ?? '默认' }}</a-tag>
+                  <a-tag v-for="tag in picture.tags" :key="tag">{{ tag }}</a-tag>
+                </a-flex>
+              </template>
+            </a-card-meta>
+          </a-card>
+        </a-list-item>
+      </template>
+    </a-list>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { useRouter } from 'vue-router'
+
+interface Props {
+  dataList?: API.PictureVO[]
+  loading?: boolean
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  dataList: () => [],
+  loading: false,
+})
+
+// 跳转至图片详情
+const router = useRouter()
+const doClickPicture = (picture) => {
+  router.push({
+    path: `/picture/${picture.id}`,
+  })
+}
+</script>
+
+<style scoped></style>
+```
+
+#### HomePage.vue(父组件,关键片段)
+
+```vue
+<!-- 模板里使用 -->
+<PictureList :dataList="dataList" :loading="loading" />
+```
+
+```ts
+// script 里引入 + 持有数据
+import PictureList from '@/components/PictureList.vue'   // ① 引入
+
+const dataList = ref<API.PictureVO[]>()                  // ② 状态真正存这里
+const loading = ref(true)
+
+const fetchData = async () => {
+  // ...
+  dataList.value = res.data.data.records ?? []           // ③ 父负责改数据
+}
+```
+
+#### router/index.ts(两条动态路由)
+
+```ts
+{ path: '/picture/:id', name: '图片详情', component: PictureDetailPage, props: true },
+{ path: '/space/:id',   name: '空间详情', component: SpaceDetailPage,  props: true },
+```
+
+#### SpaceDetailPage.vue(路由组件,接参片段)
+
+```ts
+interface Props {
+  id: string | number
+}
+const props = defineProps<Props>()
+
+const fetchSpaceDetail = async () => {
+  const res = await getSpaceVoByIdUsingGet({ id: props.id })   // ← 用 props.id
+}
+
+const fetchData = async () => {
+  const params = {
+    spaceId: props.id,   // const id = route.query?.id  ← 这条注释是坑,见第六节
+    ...searchParams
+  }
+}
+```
+
+---
+
+### 一、第一步:怎么引入并使用一个自定义组件
+
+```ts
+import PictureList from '@/components/PictureList.vue'
+```
+
+逐点拆:
+
+- `import PictureList` —— **默认导入**。`.vue` 文件用 `<script setup>` 时,整个组件作为 `default` 导出,这里取的就是它,名字 `PictureList` 可自定义。
+- `from '@/components/PictureList.vue'` —— `@/` 是 Vite 配的路径别名,指 `src/`。
+
+**Vue 3 的关键认知(很多人卡在这):** 在 Vue 2 里,光 `import` 还不够,还得手动登记:
+
+```ts
+// Vue 2 老写法
+import PictureList from '...'
+export default {
+  components: { PictureList },   // ← 必须登记,模板才能用
+}
+```
+
+但 Vue 3 用了 `<script setup>` 后,**`import` 进来的组件会自动在模板里可用,不用再写 `components: { ... }`**。所以 HomePage 里看不到任何「注册」痕迹,却能直接 `<PictureList />`。
+
+> 英文拆词:component = 组件;register = 注册。`components` 选项就是「组件登记表」,`<script setup>` 把这步自动化了。
+
+> 一句话:**`import` 进来 → `<script setup>` 自动注册 → 模板里当标签用。**
+
+### 二、第二步:子组件怎么声明「我能接收什么」(props)
+
+```ts
+interface Props {
+  dataList?: API.PictureVO[]
+  loading?: boolean
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  dataList: () => [],
+  loading: false,
+})
+```
+
+#### ① `interface Props` + `defineProps<Props>()`
+
+和 [PictureUpload.vue](src/components/PictureUpload.vue) 完全同款:`defineProps` 是**编译宏**(只在编译期生效、运行时不存在,所以不用 import),尖括号里的 `Props` 是「基于类型的 props 声明」,`?` 表示可选。这俩上一篇讲透了,不赘述。
+
+#### ② `withDefaults(...)` —— 给可选 prop 设默认值
+
+这是和 PictureUpload(裸 `defineProps<Props>()`,**没默认值**)的关键区别。`dataList?` 里的 `?` 只表示「可以不传」,但**不传时值是 `undefined`**;而模板里 `<a-list :data-source="dataList">` 拿到 `undefined` 可能出问题。`withDefaults` 兜底:不传就给空数组 `[]`、`loading` 不传就给 `false`。
+
+#### ③ 重点:`dataList: () => []` 为什么是函数,不能直接写 `[]`
+
+```ts
+withDefaults(defineProps<Props>(), {
+  dataList: () => [],      // ✅ 工厂函数,每次新建空数组
+  // dataList: [],         // ❌ 直接写,所有实例共享同一个数组
+})
+```
+
+**引用类型(数组、对象)的默认值必须用函数返回,不能直接写死。** 直接写 `[]`,所有用到这个组件的地方会**共享内存里同一个数组**——A 处往里 push 数据,B 处跟着变。用函数 `() => []`,每次取默认值都**新建一个空数组**,各用各的,互不污染。
+
+> 这和 Vue 的 `data()` 为什么是函数,是**完全同一个道理**:防共享、防串数据。`withDefaults` 的对象模式里,引用类型字段一律走工厂函数。
+
+### 三、第三步:父子数据怎么流转(单向)
+
+```
+┌─────────────── 父:HomePage.vue ───────────────┐
+│                                                 │
+│  const dataList = ref<API.PictureVO[]>()   ← 状态真正存这 │
+│  fetchData(): dataList.value = res...records   ← 父负责改   │
+│                                                 │
+│  <PictureList :dataList="dataList" :loading="loading" /> │
+└──────────┬─────────────────────────────────────┘
+           │  :dataList  :loading   数据向下
+           ▼
+┌─────────────── 子:PictureList.vue ────────────┐
+│  props.dataList   ← 子只读,不修改               │
+│  <a-list :data-source="dataList">  ← 直接拿去渲染 │
+└─────────────────────────────────────────────────┘
+```
+
+#### ① `:dataList="dataList"` 两个 dataList 不是一回事
+
+- **左边**(冒号后、等号前):子组件 `interface Props` 里声明的那个 `dataList` 名字,意思是「往子的 `dataList` 这个 prop 塞东西」。
+- **右边**(等号后、引号里):父组件 HomePage 里的变量 `const dataList = ref(...)`。
+- 中间的 `:` 是 `v-bind:` 的简写,表示「等号后是 **JS 表达式**(变量),把它的值传进去」。
+
+> ⚠️ 新手最常踩的坑:漏写冒号 `dataList="dataList"`。漏了 `:`,引号里的内容会被当成**字符串字面量** `"dataList"` 传进去,而不是变量——子组件拿到的就是个字符串,不是图片数组。**带不带 `:`,含义天差地别。**
+
+#### ② 子组件模板里为什么能直接写 `dataList` 不加 `props.`
+
+`<script setup>` 会把 `defineProps` 的返回**自动暴露给模板**。所以模板里 `:data-source="dataList"`、`:loading="loading"` 直接用名字即可;但在 `<script>` 里要用就得写 `props.dataList`。这就是为什么 PictureList 模板里能看到光秃秃的 `dataList`。
+
+### 四、第四步:点击图片怎么跳转(写在子组件内部)
+
+整段跳转逻辑**全在子组件 PictureList 里**,父组件不参与:
+
+```vue
+<a-card hoverable @click="doClickPicture(picture)">
+```
+
+```ts
+const router = useRouter()
+const doClickPicture = (picture) => {
+  router.push({ path: `/picture/${picture.id}` })
+}
+```
+
+#### ① `#renderItem="{ item: picture }"` —— a-list 的具名插槽
+
+```vue
+<template #renderItem="{ item: picture }">
+```
+
+- `#renderItem` 是 `v-slot:renderItem` 的简写,**具名插槽**——a-list 每渲染一条数据,就把这条数据塞进名为 `renderItem` 的插槽给你。
+- `{ item: picture }` 是**解构 + 重命名**:从插槽传来的对象里取出 `item` 字段,并改名叫 `picture`。所以这个 `picture` 就是「当前正在渲染的这一张图」,`doClickPicture(picture)` 把它传给方法。
+
+> 英文拆词:slot = 插槽(组件留给外部「填内容」的口子);render = 渲染。`#renderItem` = 「渲染每一条时,用我给的模板」。
+
+#### ② `useRouter()` vs `useRoute()` —— 高频混淆点
+
+```ts
+import { useRouter } from 'vue-router'
+const router = useRouter()
+```
+
+长得几乎一样,但功能完全不同:
+
+| | `useRouter()` | `useRoute()` |
+|---|---|---|
+| 拿到什么 | **路由实例**(router) | **当前路由对象**(route) |
+| 用来干嘛 | **做动作**:跳转 `router.push` / `router.replace` | **读状态**:看当前地址、读参数 `route.params.id` / `route.query.tab` |
+| 本组件用哪个 | ✅ 要跳页,用这个 | —— |
+
+记法:**带 r 的 `useRouter` 是「做动作」(跳),不带 r 的 `useRoute` 是「读状态」(看)。** PictureList 要「跳」,所以 `useRouter`;详情页要「看用户点的是哪张」,所以 `useRoute`(或 `props.id`)。
+
+> 英文拆词:router = 路由器(执行跳转的「司机」);route = 路由(当前这条路径的「地图信息」)。一个是「人」,一个是「状态」。
+
+#### ③ `router.push({ path: ... })` —— 编程式导航
+
+```ts
+router.push({ path: `/picture/${picture.id}` })
+```
+
+- `router.push(...)` —— 往浏览器历史里**压入**一条新记录并跳过去(所以点浏览器「后退」能回列表页)。不想让后退就用 `router.replace(...)`(MySpacePage 用的就是这个)。
+- 参数是**对象** `{ path: ... }`,也能写字符串 `router.push('/picture/123')`。对象写法好处是能附带 `query` / `params`(见第六节)。
+- `` `/picture/${picture.id}` `` —— **模板字符串**(反引号包),`${}` 嵌变量。`id` 为 `123` 时拼出 `/picture/123`。
+
+#### ④ 落到详情页:动态路由匹配
+
+`/picture/123` 去**路由表**找匹配,命中 `{ path: '/picture/:id', props: true }`(`:id` 是占位符,匹配任意一段),把 `123` 存进 `route.params.id`;因配了 `props: true`,自动注入成详情页的 `props.id`。这条链路的细节(含 `props: true` 机制、为什么 id 是字符串)详见前文「图片详情页路由传参」。
+
+#### ⑤ ⚠️ 顺带:HomePage 里有一份重复的死代码
+
+[HomePage.vue:168-177](src/pages/HomePage.vue#L168-L177) 还留着一份**一模一样**的 `doClickPicture` + `router.push`,但模板里根本没用到(点击逻辑已整体下沉到 PictureList)。这是封装后遗留的**死代码**,可以删。它正好印证封装的意义:**「点击跳详情」连同数据展示一起被打包进 PictureList,父组件不再操心。**
+
+### 五、和受控组件 PictureUpload 的对比(建立全局观)
+
+| | PictureUpload(受控组件) | PictureList(本例,展示型) |
+|---|---|---|
+| 谁存状态 | 父组件存 `picture` | 父组件存 `dataList` |
+| 数据流向 | 父→子(`:picture`) | 父→子(`:dataList`) |
+| 子要不要回报父 | **要**(`props.onSuccess?.(...)` 回调) | **不要**(子自己跳路由) |
+| 通信模式 | 数据向下 **+ 事件向上** | **只有数据向下** |
+
+**为什么 PictureList 不需要回调?** 因为「点图片跳详情」子组件自己就能干(`useRouter` + `push`),不需要麻烦父;而 PictureUpload 上传成功后要改的是**父手里的状态**,子没权限改,只能回调「叫一声」让父改。
+
+> 判断标准:**子能自己搞定的(如跳页)不用回调;要改父状态的(如更新数据)才用回调上报。**
+
+### 六、横向对比:params / query / props 三者关系
+
+前文「图片详情页路由传参」侧重讲 **params + `props: true`**;这里补上 **query** 这个维度,把三者摆一起。
+
+#### ① URL 上有两类参数位置
+
+```
+         /space/123?tab=member
+         ────┮───┤ ┠───┨
+             │       │
+             │       └─ 问号后面 → 查询参数(query),用 route.query 读
+             └─ 路径里的段 → 路径参数(params),用 route.params 读
+                             (props.id 配了 props:true 时,读的也是它)
+```
+
+#### ② 三套读取方式对照
+
+| | params(路径参数) | query(查询参数) |
+|---|---|---|
+| URL 样子 | `/space/123` | `/space?id=123` 或 `/space/123?tab=member` |
+| 路由表 | 要声明 `path: '/space/:id'` | 不用声明,随便加 |
+| 读法 1 | `route.params.id` | `route.query.tab` |
+| 读法 2 | `props.id`(**需** `props: true`) | ❌ 没有 |
+| 类型 | 永远是 string(详见前文) | 永远是 string |
+
+**核心一句:`props.id` 和 `route.params.id` 读的是同一个值(URL 路径段),只是两个入口;`route.query` 读的是问号后面,完全是另一块地方。** 而 `props: true` 是 **params 专属**语法糖,**query 永远不会被它转成 props**(默认只能 `route.query` 读)。
+
+#### ③ SpaceDetailPage 那条注释为什么是坑
+
+[SpaceDetailPage.vue:95](src/pages/SpaceDetailPage.vue#L95):
+
+```ts
+spaceId: props.id, // const id = route.query?.id
+```
+
+实际跳转入口——[MySpacePage.vue:41](src/pages/MySpacePage.vue#L41) 的 `router.replace(`/space/${space?.id}`)` 和 [AddSpacePage.vue:90](src/pages/AddSpacePage.vue#L90)——都是把 id **拼进路径**(`/space/123`,params 风格),没有任何一个用 `?id=`。于是:
+
+- URL 是 `/space/123` → `123` 进 `route.params` → `props.id` = `"123"` ✅
+- URL 里**没有** `?id=` → `route.query.id` = **`undefined`** ❌
+
+**若真换成注释里的 `route.query?.id`,`spaceId` 会变成 `undefined`,图片列表加载不出来。** 那个 `?.` 可选链只防「读 undefined 时报错」,救不了「值本来就是 undefined」。当前代码用 `props.id` 才对。
+
+> 什么时候才该用 `route.query.id`?只有跳转写成 `router.push({ path: '/space', query: { id: 123 } })`、URL 变 `/space?id=123` 时。本项目不是这么跳的。
+
+#### ④ 跳转的三种合法写法 + 一个经典坑
+
+```ts
+// ✅ 写法 1:纯字符串,手动拼
+router.push('/space/123?tab=member')
+
+// ✅ 写法 2:对象写法 —— params 靠 path,query 靠 query 字段(推荐)
+router.push({ path: '/space/123', query: { tab: 'member' } })
+
+// ✅ 写法 3:对象写法 —— 用 name + params
+router.push({ name: '空间详情', params: { id: 123 }, query: { tab: 'member' } })
+
+// ❌ 经典坑:path 和 params 不能混用
+router.push({ path: '/space/:id', params: { id: 123 } })   // params 会被忽略!
+```
+
+记法:**`params` 字段只能和 `name` 搭配;一旦用了 `path`,id 就得老老实实拼进路径字符串**。query 则没这个限制,跟谁都搭。
+
+#### ⑤ 彩蛋:函数式 props 让 query 也进 props
+
+`props: true` 只转 params。若想让 query 也走 props,把 `props` 写成**函数**(前文已展开):
+
+```ts
+{
+  path: '/space/:id',
+  component: SpaceDetailPage,
+  props: route => ({ id: route.params.id, tab: route.query.tab })   // params + query 都塞进来
+}
+```
+
+`props` 三种写法:`true`(只转 params,本项目用)、`{ id: 1 }` 对象(静态写死)、`route => ({...})` 函数(最灵活,params/query 都能进、还能顺手做类型转换)。详见前文「图片详情页路由传参」第六节。
+
+### 七、一个易混点:路由组件的 props 来自「路由」,不是父组件
+
+同样是 `defineProps`,在**普通子组件**和**路由组件**里数据来源完全不同:
+
+| | 普通子组件 PictureList | 路由组件 SpaceDetailPage |
+|---|---|---|
+| props 从哪来 | **父组件模板**传:`<PictureList :dataList="...">` | **Vue Router** 注入(配了 `props: true`) |
+| 「父」是谁 | HomePage / SpaceDetailPage 这些页面 | 路由系统(没有具体父组件) |
+| 传的是什么 | `dataList`、`loading`(业务数据) | `id`(URL 参数) |
+
+SpaceDetailPage 同时演两个角色:作为**路由组件**接收路由注入的 `props.id`;作为**父组件**在 [第 27 行](src/pages/SpaceDetailPage.vue#L27) `<PictureList :dataList="dataList" :loading="loading" />` 把图片数据传给 PictureList——和 HomePage 写法一模一样。**它既是子(对路由)、又是父(对 PictureList)。**
+
+### 八、概念小结
+
+| 概念 | 在本例的体现 |
+|---|---|
+| **`<script setup>` 免注册** | `import` PictureList 后无需 `components: {}`,模板直接用 |
+| **`withDefaults` + 工厂函数** | 引用类型默认值必须 `() => []`,防多实例共享同一数组 |
+| **`:prop="变量"` 单向数据流** | 父持有 `dataList` 向下传,子只读;漏写 `:` 会传成字符串 |
+| **模板免 `props.` 前缀** | `<script setup>` 自动把 props 暴露给模板 |
+| **具名插槽 `#renderItem`** | a-list 渲染每条时把数据塞进插槽,`{ item: picture }` 解构重命名 |
+| **`useRouter` vs `useRoute`** | 带 r 做动作(跳)、不带 r 读状态(看参数) |
+| **`router.push({ path })`** | 编程式导航,模板字符串拼动态 id |
+| **展示型 vs 受控组件** | PictureList 只数据向下;PictureUpload 还要事件向上(回调) |
+| **params vs query** | 路径段(`/space/123`)vs 问号后(`?tab=`),读法、跳转写法都不同 |
+| **`props: true` 只转 params** | query 不进 props,只能 `route.query` 读 |
+| **路由组件 props 来源** | 来自路由系统注入,非业务父组件 |
+| **path 与 params 不能混用** | `params` 字段只能配 `name`,配 `path` 会被忽略 |
+
+### 九、一句话总结
+
+> 一个 `.vue` 文件被 `import` 后,在 `<script setup>` 下**免注册**即可当标签用;PictureList 用 `withDefaults(defineProps<Props>(), { dataList: () => [] })` 声明入参(引用类型默认值必须用工厂函数防共享),父组件 `:dataList="dataList"` 把图片数组**单向**传下来、子只读只展示。点击图片时**子组件自己** `useRouter()`(做动作)/`router.push` 跳转(区别于读状态的 `useRoute`),不需要回调父——这正是「展示型组件」(只数据向下)区别于「受控组件 PictureUpload」(数据向下 + 事件向上)的地方。至于 URL 参数:`props.id` 和 `route.params.id` 读的是**路径段**(`/space/123`),`route.query` 读的是**问号后**(`?tab=`),`props: true` 只转 params 不转 query;SpaceDetailPage 那条 `route.query?.id` 注释之所以是坑,正因为本项目跳转用路径风格、URL 里没问号,query 拿到的只会是 `undefined`。
+
+---
+
+# 2026/08/02
+
+## spaceId 的完整传递流程:从空间详情页编辑图片,为什么能显示「保存至空间」
+
+> 问题缘起:在 [AddPicturePage.vue](src/pages/AddPicturePage.vue) 顶部看到这么一段——
+>
+> ```html
+> <a-typography-paragraph v-if="spaceId" type="secondary">
+>   保存至空间：<a :href="`/space/${spaceId}`" target="_blank">{{spaceId}}</a>
+> </a-typography-paragraph>
+> ```
+>
+> 疑问一个接一个:
+> 1. 为什么从**空间详情页**点图片「编辑」进 AddPicturePage,这行「保存至空间」会显示;从**主页**点图片(经图片详情页)再编辑就不显示?
+> 2. `spaceId` 这个值到底是怎么一路传到 AddPicturePage 的?
+>
+> 调查中顺带厘清了两个前置疑惑:**主页的图片卡为什么连「编辑」按钮都没有**(`showOp` 语法糖);**图片详情页的 doEdit 为什么带不上 spaceId**(根因)。这篇笔记把整条数据传递链路串透。涉及的 `router.push` / `route.query` / `computed` / `v-if` 等概念,前文已拆解过(见「自定义封装组件 PictureList」「图片详情页路由传参」),这里只引用不重复。
+
+### 附:涉及的四处关键代码
+
+**① 两个页面分别怎么用 PictureList 组件**
+
+```html
+<!-- 主页 HomePage.vue:38 —— 没传 showOp -->
+<PictureList :dataList="dataList" :loading="loading" />
+
+<!-- 空间详情页 SpaceDetailPage.vue:29 —— 传了 showOp(光秃秃) -->
+<PictureList :dataList="dataList" :loading="loading" showOp :onReload="fetchData"/>
+```
+
+**② PictureList.vue 里 showOp 怎么控制操作栏**
+
+```ts
+// PictureList.vue:66  声明(可选布尔)
+interface Props {
+  showOp?: boolean
+}
+// PictureList.vue:73  默认 false
+const props = withDefaults(defineProps<Props>(), {
+  showOp: false,
+})
+```
+
+```html
+<!-- PictureList.vue:39  只有 showOp 为 true 才渲染「编辑/删除」操作栏 -->
+<template v-if="showOp" #actions>
+  <a-space @click="(e) => doEdit(picture, e)">编辑</a-space>
+  <a-space @click="(e) => doDelete(picture, e)">删除</a-space>
+</template>
+```
+
+**③ 两个 doEdit:一个带 spaceId,一个不带(根因)**
+
+```js
+// PictureList.vue:85-96  空间详情页用的那个 —— 带了 spaceId
+const doEdit = (picture, e) => {
+  e.stopPropagation()
+  router.push({
+    path: '/add_picture',
+    query: {
+      id: picture.id,
+      spaceId: picture.spaceId,   // ← 从图片对象身上取 spaceId
+    },
+  })
+}
+
+// PictureDetailPage.vue:139-141  图片详情页用的 —— 只拼了 id!
+const doEdit = () => {
+  router.push('/add_picture?id=' + picture.value.id)
+}
+```
+
+**④ AddPicturePage.vue 怎么读 spaceId 并控制显示**
+
+```ts
+// AddPicturePage.vue:91-93  从地址栏 query 读 spaceId
+const spaceId = computed(() => {
+  return route.query?.spaceId
+})
+```
+
+```html
+<!-- AddPicturePage.vue:6-8  有值才显示「保存至空间」 -->
+<a-typography-paragraph v-if="spaceId" type="secondary">
+  保存至空间：<a :href="`/space/${spaceId}`" target="_blank">{{spaceId}}</a>
+</a-typography-paragraph>
+```
+
+---
+
+### 一、前置疑惑 1:主页的图片卡为什么连「编辑」按钮都没有(`showOp` 语法糖)
+
+最初以为「从主页点图片编辑」也能进 AddPicturePage,但仔细看代码——**主页压根没有编辑按钮**。差别就在用 PictureList 时传没传 `showOp`:
+
+```html
+<!-- 主页 -->    <PictureList :dataList="dataList" :loading="loading" />          ← 没写 showOp
+<!-- 空间详情页 --> <PictureList ... showOp :onReload="fetchData"/>               ← 写了 showOp
+```
+
+注意空间详情页那行里 `showOp` 是**光秃秃的——没有 `=`、也没有值**。这是 Vue 给**布尔类型 prop** 的语法糖:
+
+```html
+<!-- 这两种写法完全等价 -->
+<PictureList showOp />
+<PictureList :showOp="true" />
+```
+
+「只写属性名、不写值」就等于传 `true`。所以并不是没设置成 true,而是**用简写的方式设置了 true**,一眼容易看漏。
+
+#### 布尔 prop 的几种写法对比
+
+| 写法 | 等价于 | showOp 的值 |
+|------|--------|------------|
+| `showOp` | `:showOp="true"` | `true` ✅ |
+| `:showOp="true"` | —— | `true` ✅ |
+| `:showOp="false"` | —— | `false` ❌ |
+| (完全不写) | 用 `withDefaults` 里的默认值 | `false` ❌ |
+
+> ⚠️ 这个「光秃秃 = true」的语法糖**只对布尔 prop 有效**。前提是 `showOp?: boolean` 这个布尔类型声明——给字符串/数字 prop 写光秃秃的,不会得到 `"true"`。所以布尔类型声明不只是约束,也是让语法糖生效的钥匙。
+
+结合 PictureList 模板里的 `<template v-if="showOp" #actions>`:
+
+- **主页**:没传 `showOp` → 走默认值 `false` → `v-if` 为假 → **不渲染操作栏 → 连编辑按钮都没有**。
+- **空间详情页**:写了 `showOp` → 值为 `true` → `v-if` 为真 → 渲染编辑/删除按钮。
+
+所以主页这条路第一步就走不通——**没有编辑入口,自然进不了带 spaceId 的流程**。
+
+### 二、spaceId 的完整传递流程(核心)
+
+抛开主页不谈,单看「空间详情页 → 编辑 → AddPicturePage」这条路,spaceId 是靠**地址栏的查询参数(query)**在两个页面之间搬运的。它最初的来源不是页面,而是**图片对象自己身上的字段** `picture.spaceId`。完整五步:
+
+```
+① 起点:值从哪来
+   空间详情页 SpaceDetailPage
+   <PictureList showOp />                ← showOp 让「编辑」按钮显示
+        │  用户点「编辑」
+        ▼
+② PictureList.doEdit(picture, e)         ← 这张 picture 对象带 spaceId 字段
+   router.push({
+     path:  '/add_picture',
+     query: { id: picture.id, spaceId: picture.spaceId }
+   })                                    ← 把 spaceId 塞进 query
+        │
+        ▼
+③ 中转:塞进地址栏
+   浏览器地址栏变成:
+   /add_picture?id=123&spaceId=456       ← URL 就是两个页面之间的「快递员」
+        │
+        ▼
+④ 终点:AddPicturePage 读出来
+   const spaceId = computed(() => route.query?.spaceId)   ← 读到 '456'
+        │
+        ▼
+⑤ 控制显示
+   <a-typography-paragraph v-if="spaceId">  ← 有值 → 显示「保存至空间」
+```
+
+#### 关键认知:为什么 spaceId 来自 `picture.spaceId`,不是页面变量
+
+[PictureList.vue:85-96](src/components/PictureList.vue#L85-L96) 的 doEdit 里,`spaceId` 是从**这张图片对象身上**取的(`picture.spaceId`),不是从 SpaceDetailPage 的 `props.id` 取的。
+
+- 空间详情页里的图片都是「私有空间的图」,后端返回时给每张图都打了 `spaceId` 这个标记 → `picture.spaceId` 有值。
+- 主页的公共图片没有空间归属 → `picture.spaceId` 是空的。
+
+这点是后面「双重保险」成立的基础。
+
+#### 为什么用 URL 当载体
+
+跨页面传值最常用的方式就是 **URL 查询参数**。好处是:**刷新页面、分享链接,值都还在**。`router.push` 的 `query` 字段会被 Vue Router 拼到地址栏(`?id=123&spaceId=456`),目标页面用 `route.query` 读回来。这条「写进地址栏 → 从地址栏读」的链路,和前文「图片详情页路由传参」里 HomePage → 详情页 传 `id` 是同一个套路,只不过那次走的是**路径段(params,`/picture/123`)**,这次走的是**问号后(query,`?spaceId=456`)**。
+
+### 三、前置疑惑 2 + 根因:图片详情页的 doEdit 漏传了 spaceId
+
+那「主页 → 图片详情页 → 编辑 → AddPicturePage」这条路呢?这才是最初真正遇到的场景。问题出在**图片详情页的「编辑」跳转语句**上。
+
+看 [PictureDetailPage.vue:139-141](src/pages/PictureDetailPage.vue#L139-L141):
+
+```js
+const doEdit = () => {
+  router.push('/add_picture?id=' + picture.value.id)   // ← 只拼了 id,没拼 spaceId!
+}
+```
+
+对比空间详情页用的那个 doEdit([PictureList.vue:85-96](src/components/PictureList.vue#L85-L96)),人家多带了 `spaceId: picture.spaceId`。**图片详情页这个 doEdit 偷懒了,只拼 id。**
+
+于是地址栏长这样:
+
+| 入口 | 跳转后的地址栏 | 有没有 spaceId |
+|------|---------------|---------------|
+| 空间详情页点编辑 | `/add_picture?id=123&spaceId=456` | ✅ 有 |
+| **图片详情页点编辑** | `/add_picture?id=123` | ❌ **没有** |
+
+AddPicturePage 那边 `const spaceId = computed(() => route.query?.spaceId)` 从地址栏读,地址栏里压根没有 `spaceId`,读出来就是 `undefined`,于是 `v-if="spaceId"` 为假 → 「保存至空间」不显示。**就这么简单——是跳转时漏传了参数,不是什么复杂逻辑。**
+
+#### 修复:让图片详情页也带上 spaceId
+
+图片详情页手上是有 `picture` 对象的([第 100 行](src/pages/PictureDetailPage.vue#L100) `fetchPictureDetail` 拿到的),如果这张图属于某个私有空间,`picture.value.spaceId` 本身就有值。把 doEdit 改成和 PictureList 一样的写法即可:
+
+```js
+const doEdit = () => {
+  router.push({
+    path: '/add_picture',
+    query: {
+      id: picture.value.id,
+      spaceId: picture.value.spaceId,
+    },
+  })
+}
+```
+
+改完之后,正好和「双重保险」对得上(见下表)。
+
+### 四、「主页不行」其实是双重保险
+
+把三条路放一起看,「为什么不显示」有两层独立的原因:
+
+| | 主页 → 图片详情页 → 编辑 | 空间详情页 → 编辑 |
+|---|---|---|
+| ① 有没有编辑按钮 | ❌ 主页没传 `showOp`,按钮不显示 | ✅ 传了 `showOp`,按钮显示 |
+| ② 图片带不带 spaceId | ❌ 公共图,`picture.spaceId` 为空 | ✅ 私有空间图,带 `spaceId` |
+| ③ doEdit 有没有传 spaceId | (图片详情页 doEdit 本来就没传) | ✅ PictureList 的 doEdit 传了 |
+| ④ 地址栏有没有 spaceId | ❌ 没有 | ✅ `&spaceId=456` |
+| ⑤ `v-if` 结果 | ❌ 不显示 | ✅ 显示「保存至空间」 |
+
+哪怕强行让主页也显示编辑按钮(假设补了 `showOp`),因为公共图片的 `picture.spaceId` 是空的,query 里照样没有 spaceId,`v-if` 还是 false。**所以这套设计是自洽的:只有「真正属于某个空间的图片」才会带上这个标记,「保存至空间」才露面。**
+
+> 当前图片详情页的 doEdit 没带 spaceId,严格说算个小遗漏——如果产品允许「在图片详情页编辑私有空间的图」,建议按第三节补一下。补了之后,公共图依然不会显示(因为 `picture.spaceId` 本来就空),私有空间图才会显示,行为正确。
+
+### 五、概念小结
+
+| 概念 | 在本例的体现 |
+|---|---|
+| **布尔 prop 语法糖** | `<PictureList showOp />` 光秃秃写法 = `:showOp="true"`,只对布尔 prop 有效 |
+| **`v-if` 控制插槽** | `<template v-if="showOp" #actions>`,showOp 为真才渲染操作栏 |
+| **跨页面传值载体 = URL query** | doEdit 把 spaceId 塞进 `router.push({ query })`,目标页用 `route.query` 读回 |
+| **`router.push` 对象写法** | `{ path, query: { id, spaceId } }`,query 字段被拼成 `?id=&spaceId=` |
+| **`computed` 读 query** | `computed(() => route.query?.spaceId)`,地址栏变它就跟着变 |
+| **值来自图片对象字段** | `picture.spaceId`,不是页面变量;公共图为空、私有空间图有值 |
+| **双重保险** | 「有没有编辑按钮」+「图片带不带 spaceId」两层独立条件,公共图怎么都带不上 |
+| **漏传参数** | 图片详情页 doEdit 只拼 id 没拼 spaceId,是「不显示」的直接根因 |
+
+### 六、一句话总结
+
+> 「保存至空间」那行字显不显示,全看 AddPicturePage 的 `spaceId = computed(() => route.query?.spaceId)` 能不能从地址栏读到值。空间详情页这条路:PictureList 的 doEdit 把 `picture.spaceId` 塞进 `router.push({ query })` → 地址栏变成 `/add_picture?id=&spaceId=` → AddPicturePage 读到 → `v-if` 显示。而「主页不行」是双重保险:主页没传 `showOp`(光秃秃布尔语法糖 = true,不传则默认 false)连编辑按钮都没有;即便从图片详情页进,那里的 doEdit **只拼了 id 漏传 spaceId**,地址栏没 spaceId 自然不显示——而且公共图片的 `picture.spaceId` 本来就空,补传了也不会显示,只有真正属于私有空间的图才会带上这个标记。
+
+---
