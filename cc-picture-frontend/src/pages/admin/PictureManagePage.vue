@@ -227,7 +227,8 @@ const pagination = computed(() => {
 // 获取数据
 const fetchData = async () => {
   const res = await listPictureByPageUsingPost({
-    ...searchParams
+    ...searchParams,
+    nullSpaceId: true, // 是否只查询 spaceId 为 null (公共图库)的数据
   })
   if (res.data.data) {
     dataList.value = res.data.data.records ?? []
