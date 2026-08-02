@@ -27,6 +27,7 @@ import { uploadPictureUsingPost } from '@/api/pictureController';
  */
 interface Props {
   picture?: API.PictureVO
+  spaceId: number
   onSuccess?: (newPicture: API.PictureVO) => void
 }
 
@@ -58,6 +59,7 @@ const handleUpload = async ({file}: any) => {
     // 调用后端⁡⁡⁡上传图片接口时，如果已经有⁠⁠⁠ pictureId
     // 表示对已上传的图片进行更新，需​​​要将该参数也添加到请求中，⁠⁠⁠否则每次都会新增图片记录
     const params = props.picture ? {id: props.picture.id} : {};
+    params.spaceId = props.spaceId // 添加空间ID到请求中 实现私有空间图片上传功能
     const res = await uploadPictureUsingPost(params, {}, file)
     if (res.data.code === 0 && res.data.data){
       message.success('图片上传成功')

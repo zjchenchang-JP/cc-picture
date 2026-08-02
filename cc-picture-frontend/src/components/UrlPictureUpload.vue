@@ -40,6 +40,8 @@ const handleUpload = async () => {
     if (props.picture) {
       params.id = props.picture.id
     }
+    // 添加空间ID到请求中 实现私有空间图片上传功能
+    params.spaceId = props.spaceId
     const res = await uploadPictureByUrlUsingPost(params)
     if (res.data.code === 0 && res.data.data) {
       message.success('图片上传成功')
