@@ -25,6 +25,10 @@
         </a-tooltip>
       </a-space>
     </a-flex>
+    <div style="margin-bottom: 5px" />
+    <!-- 搜索表单 -->
+    <PictureSearchForm :onSearch="onSearch" />
+    <div style="margin-bottom: 20px" />
     <!-- 图片列表 -->
     <PictureList :dataList="dataList" :loading="loading" showOp :onReload="fetchData"/>
     <!-- 分页 -->
@@ -45,6 +49,7 @@ import { formatSize } from '@/utils'
 import { message } from 'ant-design-vue';
 import { computed, onMounted, reactive, ref } from 'vue'
 import PictureList from '@/components/PictureList.vue'
+import PictureSearchForm from '@/components/PictureSearchForm.vue'
 
 interface Props {
   id: string | number
@@ -94,7 +99,7 @@ const total = ref(0)
 const loading = ref(true)
 
 // 搜索条件
-const searchParams = reactive<API.PictureQueryRequest>({
+const searchParams = ref<API.PictureQueryRequest>({
   current: 1,
   pageSize: 12,
   sortField: 'createTime',
@@ -107,7 +112,7 @@ const fetchData = async () =>{
   // 转换搜索参数
   const params = {
     spaceId: props.id, // const id = route.query?.id
-    ...searchParams
+    ...searchParams.value
   }
   const res = await listPictureVoByPageUsingPost(params)
   if (res.data.code === 0 && res.data.data) {
@@ -132,6 +137,16 @@ const onPageChange = (page: number, pageSize: number) => {
   // searchParams.current = page
   // searchParams.pageSize = pageSize
   // v-model 已经帮你把 searchParams 改好了，这里只管重新请求数据
+  fetchData()
+}
+
+// ------ 搜索 -------
+const onSearch = (newSearchParams: API.PictureQueryRequest) => {
+  searchParams.value = {
+    ...searchParams.value,
+    ...newSearchParams,
+    current: 1 // 展开运算符 后面的覆盖前面的同名键
+  }
   fetchData()
 }
 
