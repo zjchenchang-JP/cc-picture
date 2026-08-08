@@ -682,7 +682,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 2 校验空间权限
         Space space = spaceService.getById(spaceId);
         ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
-        ThrowUtils.throwIf(space.getUserId().equals(loginUser.getId()), ErrorCode.NO_AUTH_ERROR, "没有空间访问权限");
+        ThrowUtils.throwIf(!space.getUserId().equals(loginUser.getId()), ErrorCode.NO_AUTH_ERROR, "没有空间访问权限");
         return pictureIdList;
     }
 

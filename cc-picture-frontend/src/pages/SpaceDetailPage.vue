@@ -12,6 +12,7 @@
         >
           + 创建图片
         </a-button>
+        <a-button :icon="h(EditOutlined)" @click="doBatchEdit"> 批量编辑</a-button>
         <a-tooltip
           placement="left"
           :title="`占用空间 ${formatSize(space.totalSize)} / ${formatSize(space.maxSize)}`"
@@ -45,6 +46,13 @@
       :show-total="() => `图片总数 ${total} / ${space.maxCount}`"
       @change="onPageChange"
     />
+    <!-- 引入批量编辑图片组件 -->
+    <BatchEditPictureModal
+      ref="batchEditPictureModalRef"
+      :spaceId="id"
+      :pictureList="dataList"
+      :onSuccess="onBatchEditPictureSuccess"
+    />
   </div>
 </template>
 <script setup lang="ts">
@@ -52,11 +60,13 @@ import { listPictureVoByPageUsingPost, searchPictureByColorUsingPost } from '@/a
 import { getSpaceVoByIdUsingGet } from '@/api/spaceController';
 import { formatSize } from '@/utils'
 import { message } from 'ant-design-vue';
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, h } from 'vue'
 import PictureList from '@/components/PictureList.vue'
 import PictureSearchForm from '@/components/PictureSearchForm.vue'
 import { ColorPicker } from 'vue3-colorpicker'
 import 'vue3-colorpicker/style.css'
+import BatchEditPictureModal from '@/components/BatchEditPictureModal.vue';
+import { EditOutlined } from '@ant-design/icons-vue'
 
 interface Props {
   id: string | number
@@ -172,6 +182,21 @@ const onColorChange = async (color: string) => {
     message.error('获取数据失败，' + res.data.message)
   }
   loading.value = false
+}
+
+
+// ----- 批量编辑图片组件 弹窗引用 -----
+// 通过 ⁡⁡⁡ref 获取到⁠弹⁠窗⁠的引用，在批量编辑成功后​要刷新​图片列​表⁠数据
+const batchEditPictureModalRef = ref()
+
+// 批量编辑成功后，刷新数据
+const onBatchEditPictureSuccess = () => {
+  fetchData()
+}
+
+// 打开弹窗组件
+const doBatchEdit = () => {
+  if (batchEditPictureModalRef.value) batchEditPictureModalRef.value.openModal()
 }
 
 </script>
