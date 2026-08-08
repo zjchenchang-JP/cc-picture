@@ -24,6 +24,17 @@
         />
       </a-tab-pane>
     </a-tabs>
+    <!-- 图片编辑操作 按钮 -->
+    <div v-if="picture" class="edit-bar">
+      <a-button :icon="h(EditOutlined)" @click="doEditPicture">编辑图片</a-button>
+      <ImageCropper
+        ref="imageCropperRef"
+        :imageUrl="picture?.url"
+        :picture="picture"
+        :spaceId="spaceId"
+        :onSuccess="onCropSuccess"
+      />
+    </div>
     <!-- 图片信息表单 -->
     <a-form
       v-if="picture"
@@ -78,8 +89,10 @@ import {
 import PictureUpload from '@/components/PictureUpload.vue'
 import UrlPictureUpload from '@/components/UrlPictureUpload.vue'
 import { message } from 'ant-design-vue'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, h } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { EditOutlined } from '@ant-design/icons-vue'
+import ImageCropper from '@/components/ImageCropper.vue'
 
 const router = useRouter()
 
@@ -191,6 +204,26 @@ const getOldPicture = async () => {
 onMounted(() => {
   getOldPicture()
 })
+
+
+/**
+ * --- 图片编辑操作 ---
+ **/
+// 图片编辑弹窗引用
+const imageCropperRef = ref()
+
+// 编辑图片
+const doEditPicture = () => {
+  if (imageCropperRef.value) {
+    imageCropperRef.value.openModal()
+  }
+}
+
+// 编辑成功事件
+const onCropSuccess = (newPicture: API.PictureVO) => {
+  picture.value = newPicture
+}
+
 </script>
 
 <style scoped>
@@ -198,5 +231,11 @@ onMounted(() => {
 #addPicturePage {
   max-width: 720px;
   margin: 0 auto;
+}
+
+/* 增加上下边距和居中 */
+#addPicturePage .edit-bar {
+  text-align: center;
+  margin: 16px 0;
 }
 </style>
