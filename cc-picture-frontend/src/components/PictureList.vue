@@ -34,22 +34,15 @@
                 </a-flex>
               </template>
             </a-card-meta>
+            <!-- 弹窗分享组件 -->
+            <ShareModal ref="shareModalRef" :link="shareLink" />
             <!-- 空间详情页的图片卡片的下方增加快捷操作栏 -->
             <!-- 本⁡⁡⁡组件是主页和空间详情⁠⁠⁠页公用的，主页不需要展示操作栏、私有空间​​​才展示，所以需要使用⁠⁠⁠ showOp 属性来控制 -->
             <template v-if="showOp" #actions>
-              <!-- 以图搜图 按钮 -->
-              <a-space @click="e => doSearch(picture, e)">
-                <search-outlined />
-                搜索
-              </a-space>
-              <a-space @click="e => doEdit(picture, e)">
-                <EditOutlined />
-                编辑
-              </a-space>
-              <a-space @click="e => doDelete(picture, e)">
-                <DeleteOutlined />
-                删除
-              </a-space>
+              <search-outlined @click="(e) => doSearch(picture, e)" />
+              <share-alt-outlined @click="(e) => doShare(picture, e)" />
+              <edit-outlined @click="(e) => doEdit(picture, e)" />
+              <delete-outlined @click="(e) => doDelete(picture, e)" />
             </template>
           </a-card>
         </a-list-item>
@@ -60,9 +53,11 @@
 
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
-import { DeleteOutlined, EditOutlined, SearchOutlined } from '@ant-design/icons-vue'
+import { DeleteOutlined, EditOutlined, SearchOutlined,ShareAltOutlined } from '@ant-design/icons-vue'
 import { deletePictureUsingPost } from '@/api/pictureController'
 import { message } from 'ant-design-vue'
+import ShareModal from './ShareModal.vue'
+import { ref } from 'vue'
 
 // 定义属性，接受 data​​​List 数据列表和 l⁠⁠⁠oading 加载状态
 interface Props {
@@ -120,6 +115,22 @@ const doSearch = (picture, e) => {
   e.stopPropagation()
   window.open(`/search_picture?pictureId=${picture.id}`) // 点击搜索后打开新页面，进入到以图搜图结果页
 }
+
+
+// 分享弹窗引用
+const shareModalRef = ref()
+// 分享链接
+const shareLink = ref<string>()
+
+// 分享
+const doShare = (picture: API.PictureVO, e: Event) => {
+  e.stopPropagation()
+  shareLink.value = `${window.location.protocol}//${window.location.host}/picture/${picture.id}`
+  if (shareModalRef.value) {
+    shareModalRef.value.openModal()
+  }
+}
+
 </script>
 
 <style scoped></style>

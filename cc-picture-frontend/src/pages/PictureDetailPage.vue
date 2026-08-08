@@ -63,6 +63,8 @@
               </a-space>
             </a-descriptions-item>
           </a-descriptions>
+          <!-- 弹窗分享组件 -->
+          <ShareModal ref="shareModalRef" :link="shareLink" />
           <!-- 操作⁠按⁠钮⁠，对于图片上传者或管理员​，可以​编辑和​删⁠除图片 -->
           <a-space wrap>
             <a-button v-if="canEdit" type="default" @click="doEdit">
@@ -83,6 +85,12 @@
                 <DownloadOutlined />
               </template>
             </a-button>
+            <a-button type="primary" ghost @click="doShare">
+              分享
+              <template #icon>
+                <share-alt-outlined />
+              </template>
+            </a-button>
           </a-space>
         </a-card>
       </a-col>
@@ -101,6 +109,8 @@ import { computed, h, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { downloadImage, formatSize, toHexColor} from '@/utils'
 import { useLoginUserStore } from '@/stores/useLoginUserStore'
+import { DeleteOutlined, EditOutlined, DownloadOutlined,ShareAltOutlined } from '@ant-design/icons-vue'
+import ShareModal from '@/components/ShareModal.vue'
 
 // 图片详情⁡⁡⁡页要展示的图片是根据 ⁠⁠⁠id 而变化的，使用动态路由。
 // 在页面​​​中可以使用 props⁠⁠⁠ 获取到动态的参数
@@ -192,6 +202,20 @@ const doDelete = () => {
 // 图片下载
 const doDownload = () => {
   downloadImage(picture.value.url, picture.value.name)
+}
+
+// --- 图片分享 ---
+// 分享弹窗引用
+const shareModalRef = ref()
+
+// 分享链接
+const shareLink = ref<string>()
+
+const doShare = () => {
+  shareLink.value = `${window.location.protocol}//${window.location.host}/picture/${props.id}`
+  if (shareModalRef.value) {
+    shareModalRef.value.openModal()
+  }
 }
 
 onMounted(() => {
