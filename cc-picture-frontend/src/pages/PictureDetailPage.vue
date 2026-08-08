@@ -49,6 +49,19 @@
             <a-descriptions-item label="大小">
               {{ formatSize(picture.picSize) }}
             </a-descriptions-item>
+            <a-descriptions-item label="主色调">
+              <a-space>
+                {{ picture.picColor ?? '-' }}
+                <div
+                  v-if="picture.picColor"
+                  :style="{
+                    backgroundColor: toHexColor(picture.picColor),
+                    width: '16px',
+                    height: '16px',
+                  }"
+                />
+              </a-space>
+            </a-descriptions-item>
           </a-descriptions>
           <!-- 操作⁠按⁠钮⁠，对于图片上传者或管理员​，可以​编辑和​删⁠除图片 -->
           <a-space wrap>
@@ -86,7 +99,7 @@ import { message, Modal } from 'ant-design-vue'
 import { ExclamationCircleOutlined } from '@ant-design/icons-vue'
 import { computed, h, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { downloadImage, formatSize } from '@/utils'
+import { downloadImage, formatSize, toHexColor} from '@/utils'
 import { useLoginUserStore } from '@/stores/useLoginUserStore'
 
 // 图片详情⁡⁡⁡页要展示的图片是根据 ⁠⁠⁠id 而变化的，使用动态路由。
