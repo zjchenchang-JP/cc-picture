@@ -37,11 +37,16 @@
             <!-- 空间详情页的图片卡片的下方增加快捷操作栏 -->
             <!-- 本⁡⁡⁡组件是主页和空间详情⁠⁠⁠页公用的，主页不需要展示操作栏、私有空间​​​才展示，所以需要使用⁠⁠⁠ showOp 属性来控制 -->
             <template v-if="showOp" #actions>
-              <a-space @click="(e) => doEdit(picture, e)">
+              <!-- 以图搜图 按钮 -->
+              <a-space @click="e => doSearch(picture, e)">
+                <search-outlined />
+                搜索
+              </a-space>
+              <a-space @click="e => doEdit(picture, e)">
                 <EditOutlined />
                 编辑
               </a-space>
-              <a-space @click="(e) => doDelete(picture, e)">
+              <a-space @click="e => doDelete(picture, e)">
                 <DeleteOutlined />
                 删除
               </a-space>
@@ -55,7 +60,7 @@
 
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
-import { DeleteOutlined, EditOutlined } from '@ant-design/icons-vue'
+import { DeleteOutlined, EditOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { deletePictureUsingPost } from '@/api/pictureController'
 import { message } from 'ant-design-vue'
 
@@ -70,14 +75,14 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   dataList: () => [],
   loading: false,
-  showOp: false,
+  showOp: false
 })
 
 // 跳转至图片详情
 const router = useRouter()
-const doClickPicture = (picture) => {
+const doClickPicture = picture => {
   router.push({
-    path: `/picture/${picture.id}`,
+    path: `/picture/${picture.id}`
   })
 }
 
@@ -90,8 +95,8 @@ const doEdit = (picture, e) => {
     path: '/add_picture',
     query: {
       id: picture.id,
-      spaceId: picture.spaceId,
-    },
+      spaceId: picture.spaceId
+    }
   })
 }
 
@@ -110,7 +115,11 @@ const doDelete = async (picture, e) => {
   }
 }
 
-
+// 以图搜图
+const doSearch = (picture, e) => {
+  e.stopPropagation()
+  window.open(`/search_picture?pictureId=${picture.id}`) // 点击搜索后打开新页面，进入到以图搜图结果页
+}
 </script>
 
 <style scoped></style>
