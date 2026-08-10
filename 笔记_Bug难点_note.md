@@ -2224,3 +2224,250 @@ const search = debounce(doSearch, 500)   // 连续输入只在停顿后触发一
 
 > **`:onSuccess="onSuccess"` 是父组件把一个函数当 prop 递给子组件(不是调用),子组件上传成功后调用 `props.onSuccess?.(data)` 反向回调;这能改到父组件数据,靠的是闭包——函数出厂时把父组件变量"打包带走",在哪被调用都改的是父组件那份数据。闭包不要求"同一个函数",看的是"定义时变量看得见看不见";`<script setup>` 本身就是 Vue 偷偷包的隐形大函数 `setup()`,所以顶层变量和函数天然闭包。**
 
+---
+
+# 2026/08/10
+
+## AI 扩图轮询:从「只执行一次」到「请求卡死」的两层 Bug
+
+### 背景:AI 扩图的前端轮询机制
+
+`ImageOutPainting.vue` 点「生成图片」→ 后端创建扩图任务、拿到 `taskId` → 前端开启**轮询**(每 3 秒查一次任务状态),直到阿里云返回 `SUCCEEDED`(出图)或 `FAILED`。阿里云扩图是**异步任务**:创建任务时立即返回 `taskId`,真正出图要等几十秒,所以前端必须轮询。
+
+调一次「生成图片」,却连续踩了两个 Bug:先「轮询只跑一次就停」,修好后又「后端请求直接卡死 60 秒」。
+
+---
+
+### 原始代码(出 Bug 的版本,留存对比)
+
+下面是修复前 `ImageOutPainting.vue` 里轮询相关的完整原始代码,后面 Bug① / 衍生的分析都对照它看:
+
+```ts
+// 轮询定时器
+let pollingTimer: NodeJS.Timeout = null
+
+// 清理轮询定时器
+const clearPolling = () => {
+  if(pollingTimer) {
+    clearInterval(pollingTimer)   // ⚠️ 用的是 clearInterval(对应 setInterval)
+    pollingTimer = null
+    taskId.value = null           // ⚠️ taskId 类型是 string | undefined,赋 null 有类型错
+  }
+}
+
+// 轮询函数
+const startPolling = () => {
+  if (!taskId.value) return
+  pollingTimer = setInterval(async () => {
+    try {
+      const res = await getPictureOutPaintingTaskUsingGet({
+        taskId: taskId.value
+      })
+      if (res.data.code === 0 && res.data.data){
+        const taskResult = res.data.data.output
+        if (taskResult?.taskStatus === 'SUCCEEDED') {
+          message.success('扩图任务执行成功')
+          resultImageUrl.value = taskResult.outputImageUrl
+          // 注意:这里【没有】clearPolling()
+        } else if (taskResult?.taskStatus === 'FAILED') {
+          message.error('扩图任务失败')
+          // 这里也【没有】clearPolling()
+        }
+      }
+    } catch (error) {
+      console.error('轮询任务状态失败', error)
+      message.error('检测任务状态失败,请稍后重试')
+    } finally {
+      clearPolling()   // ⚠️ Bug① 根源:无论 RUNNING / SUCCEEDED / FAILED,每次轮询完都停 → 退化成单次请求
+    }
+  }, 3000) // 每隔 3 秒轮询一次
+}
+```
+
+**两个待修问题(对照后面的修复看):**
+
+| # | 位置 | 问题 | 后面在哪修 |
+|---|------|------|-----------|
+| 1 | `finally { clearPolling() }` | 不管什么状态,每次轮询完都停 → 只跑一次,且 RUNNING 时无提示就「卡住」 | Bug① |
+| 2 | `setInterval` + `clearInterval` | 不等上次完成就发下次(并发);且后续修 Bug① 时若把 `clearPolling()` 挪进 `catch`,会一次偶发错误就停,误杀长任务 | 衍生 |
+
+> 后端原始代码(`AliYunAiApi` 调阿里云无超时)见下面 Bug② 节内,那里贴的就是出问题的版本。
+
+---
+
+### Bug①:轮询只执行一次、界面卡住——`finally` 无条件清理了定时器
+
+**现象:** 点「生成图片」,第一次轮询(3 秒后)返回了 `taskStatus: "RUNNING"`,然后就再没动静。预期是每 3 秒轮询一次,实际只发了一次请求。
+
+**代码定位:** `setInterval` 的回调里用了 `try / catch / finally`:
+
+```ts
+pollingTimer = setInterval(async () => {
+  try {
+    const res = await getPictureOutPaintingTaskUsingGet({ taskId: taskId.value })
+    if (res.data.code === 0 && res.data.data) {
+      const taskResult = res.data.data.output
+      if (taskResult?.taskStatus === 'SUCCEEDED') { ... }
+      else if (taskResult?.taskStatus === 'FAILED') { ... }
+    }
+  } catch (error) { ... }
+  finally {
+    clearPolling()   // ← 罪魁祸首
+  }
+}, 3000)
+```
+
+**根因:`finally` 的语义。** `finally` 块**不管成功还是失败、不管任务什么状态,都会执行**。所以第一次轮询一结束(不管返回的是 RUNNING / SUCCEEDED / FAILED),`clearPolling()` 就被无条件调用,把 `setInterval` 清掉了。定时器没了,自然不会有第二次。
+
+而这次返回的是 `RUNNING`(还在跑),既不进 SUCCEEDED 分支、也不进 FAILED 分支,啥提示都没有,定时器还被清了 → 界面「卡住」。
+
+**误区:** 把「终态才该做的事」(停止轮询)放进了 `finally`。`finally` 的本意是「收尾时必须执行的清理」,但「停止轮询」是**条件性**的——只有任务到终态才该停,中间态(RUNNING)必须继续。
+
+**修复:** 把 `clearPolling()` 从 `finally` 挪出来,只放在三个「该停」的地方:`SUCCEEDED`、`FAILED`、`catch` 异常。`RUNNING` 不清理,定时器保留,继续轮询。
+
+```ts
+if (taskResult?.taskStatus === 'SUCCEEDED') {
+  ...
+  clearPolling()   // 终态:停
+} else if (taskResult?.taskStatus === 'FAILED') {
+  ...
+  clearPolling()   // 终态:停
+}
+// 其它状态(RUNNING)不清,继续轮询
+```
+
+---
+
+### Bug②:后端 `/get_task` 直接卡死 60 秒——调用阿里云没设超时
+
+**现象:** 修好 Bug① 后,轮询触发了一次,但请求 `http://localhost:8123/api/picture/out_painting/get_task?taskId=...` 直接挂住:浏览器里请求一直 **pending**(没有状态码、没有响应体,一片红),直到前端 axios 的 60 秒超时兜底,报 `AxiosError: timeout of 60000ms exceeded`。连 `code:0` 的正常响应结构都没有。
+
+**关键判断:这是后端卡死,不是前端问题。** 「请求 pending + 没有任何响应」= 服务器收到了请求但迟迟不回。如果后端正常返回(哪怕是错误),浏览器都会有状态码。卡 60 秒被 axios 掐断,说明后端这 60 秒一个字节都没吐出来。
+
+**链路定位:**
+
+```
+前端 /get_task
+  → PictureController.getPictureOutPaintingTask(taskId)
+  → aliYunAiApi.getOutPaintingTask(taskId)
+  → HttpRequest.get(阿里云地址).execute()   ← 卡在这一行
+```
+
+看 `AliYunAiApi.getOutPaintingTask`:
+
+```java
+try (HttpResponse httpResponse = HttpRequest.get(String.format(GET_OUT_PAINTING_TASK_URL, taskId))
+        .header(Header.AUTHORIZATION, "Bearer " + apiKey)
+        .execute()) {     // ← 没设超时
+    ...
+}
+```
+
+**根因:Hutool 的 `HttpRequest` 没调用 `.timeout(...)`,底层默认无限等待。** Hutool 不设超时时,走 Java 原生 `HttpURLConnection`,其默认读超时是 **0(=永不超时)**。所以阿里云那边一旦慢响应或网络抖动,后端线程就**永远卡在 `execute()` 上**,一个字节都不往回写,浏览器看到的就是一直 pending,直到前端 axios 60 秒超时。
+
+**为什么第一次能返回 `RUNNING`、这次就卡死?** 不是代码时好时坏,是**阿里云响应快慢不一**。第一次查询阿里云立刻回了 RUNNING;这次换了 taskId(新任务),阿里云这次恰好慢了/网络抖了。代码一直有这个隐患,只是第一次运气好没触发。
+
+**隐患级别:生产事故级。** 没超时的外部 HTTP 调用是经典生产隐患——每个卡住的请求会一直占着 Tomcat 的工作线程,卡住的请求多了,Tomcat 线程池(默认 200)被耗尽,整个服务对所有用户不可用。
+
+**修复:** 给两个阿里云请求都加超时(毫秒):
+
+```java
+// getOutPaintingTask
+HttpRequest.get(String.format(GET_OUT_PAINTING_TASK_URL, taskId))
+        .header(Header.AUTHORIZATION, "Bearer " + apiKey)
+        .timeout(15000)    // ← 15 秒超时,阿里云再卡最多卡 15 秒就抛错返回
+        .execute()
+
+// createOutPaintingTask 同理加 .timeout(15000)
+```
+
+加了之后,阿里云再卡,后端最多 15 秒就抛异常返回(不再是无限 pending),前端能拿到错误响应走 catch。
+
+---
+
+### 衍生:顺手治掉前端轮询的两个隐患(setInterval → setTimeout 递归)
+
+修好 Bug② 后还会冒出新问题——因为后端现在会「15 秒超时后返回错误」,前端走 `catch`,而 catch 里也有 `clearPolling()`。扩图任务可能要轮询几十秒,只要一次偶发超时,整个轮询就被终结,用户又得手动重来。外加 `setInterval` 本身还有并发隐患,一起治掉:
+
+**隐患一:`catch` 里 `clearPolling()` 会误杀轮询。** 偶发网络抖动 / 阿里云慢响应不该直接放弃,应容忍几次。
+
+**隐患二:`setInterval` 不等上次完成。** 它每隔 3 秒照发新请求,不管上一次回来没有。若某次阿里云花了 8 秒才返回,3 秒、6 秒节点又会触发新请求,几个查询同时在飞,浪费且可能乱序。
+
+**修复:`setInterval` → `setTimeout` 递归 + 失败计数。** 这是阿里云百炼文档和多数教程推荐的写法:
+
+```ts
+let pollingTimer: NodeJS.Timeout | null = null
+let pollingFailCount = 0
+const MAX_POLLING_FAIL = 3   // 连续失败 3 次才停
+
+const pollOnce = async () => {
+  if (!taskId.value) return          // 已停止就不再排下一次
+  let shouldStop = false
+  try {
+    const res = await getPictureOutPaintingTaskUsingGet({ taskId: taskId.value })
+    if (res.data.code === 0 && res.data.data) {
+      const taskResult = res.data.data.output
+      if (taskResult?.taskStatus === 'SUCCEEDED') { ...; shouldStop = true }
+      else if (taskResult?.taskStatus === 'FAILED') { ...; shouldStop = true }
+      else { pollingFailCount = 0 }  // RUNNING:重置失败计数,继续
+    }
+  } catch (error) {
+    pollingFailCount += 1            // 偶发错误先累计,不立刻放弃
+    if (pollingFailCount >= MAX_POLLING_FAIL) { ...; shouldStop = true }
+  }
+  if (shouldStop) { clearPolling(); return }
+  pollingTimer = setTimeout(pollOnce, 3000)   // 上一次返回后,才排下一次
+}
+```
+
+两点好处:
+
+1. **串行无并发**:`setTimeout` 在上一次请求**返回后**才排下一次,天然不会几个请求同时在飞。
+2. **失败容忍**:偶发错误累计计数,连续失败达阈值才停;`RUNNING` / 成功都重置计数,一次抖动不会中断轮询。
+
+> 附带修了一个类型小错:原代码 `taskId.value = null`,但 `taskId` 声明的是 `ref<string>()`(类型 `string | undefined`),不能赋 `null`。改成 `taskId.value = undefined`,判空用的 `if (!taskId.value)` 对 null / undefined 都成立,行为不变。
+
+---
+
+### 调用链全景(从点击到出图)
+
+```
+点「生成图片」
+  │
+  ▼ createPictureOutPaintingTaskUsingPost (前端)
+后端 PictureController.createPictureOutPaintingTask
+  → aliYunAiApi.createOutPaintingTask  ──POST 阿里云(异步, X-DashScope-Async: enable)
+  → 拿到 taskId,返回前端
+  │
+  ▼ 前端拿到 taskId → startPolling()
+每 3 秒:
+  前端 getPictureOutPaintingTaskUsingGet(taskId)
+  → 后端 PictureController.getPictureOutPaintingTask
+  → aliYunAiApi.getOutPaintingTask  ──GET 阿里云查询任务状态
+  → 返回 { taskStatus, outputImageUrl, ... }
+  │
+  ├─ RUNNING   → 继续轮询
+  ├─ SUCCEEDED → resultImageUrl 出图,停止轮询
+  └─ FAILED    → 提示失败,停止轮询
+```
+
+---
+
+### 经验教训
+
+1. **`finally` 是「无条件收尾」,别放条件性逻辑。** 「停止轮询」只在终态该做,放进 `finally` 等于「每次轮询完都停」,轮询退化成单次请求。要分清「必须执行的清理」(关连接、释放资源)和「条件性收尾」(达到终态才停)。
+2. **所有外部 HTTP 调用必须设超时。** Hutool `HttpRequest` / Java `HttpURLConnection` 默认不超时(无限等待),第三方一卡,你的线程就被永久占用。没超时的外部调用 = 生产定时炸弹,线程池耗尽即服务雪崩。
+3. **轮询用 `setTimeout` 递归,不用 `setInterval`。** `setInterval` 不管上次完没完成照发下一次,会并发;`setTimeout` 递归保证「上次返回再排下次」,串行且间隔可控。
+4. **轮询要对偶发错误容错。** 网络抖动、第三方慢响应是常态,一次失败就 `clearPolling()` 会让长任务(几十秒的扩图)频繁中断。用失败计数,连续 N 次才放弃。
+5. **报错先分清前端 / 后端 / 网络:**
+   - 请求 **pending、无状态码、最后 axios timeout** → 后端卡死或网络不通(本案 Bug②)。
+   - 有 HTTP 状态码 + 响应体 → 业务层问题。
+   - 请求压根没发 / 发了立刻结束 → 前端逻辑问题(本案 Bug① 是「只发了一次」)。
+6. **「第一次正常、第二次卡住」≠ 代码时好时坏。** 多半是**依赖的第三方响应快慢不一**,代码一直有隐患(无超时),只是第一次运气好没触发。遇到这种「偶发」,优先查有没有缺超时 / 缺容错。
+
+---
+
+### 一句话总结
+
+> **AI 扩图轮询连踩两个 Bug:① 前端把 `clearPolling()` 放进 `finally`,导致每次轮询完都停,退化成单次请求——`finally` 是无条件收尾,不该放「终态才停」的条件逻辑;② 后端 Hutool 调阿里云没设 `.timeout()`,默认无限等待,阿里云一慢响应,后端线程永久卡死、请求 pending 到前端 axios 60 秒超时——所有外部 HTTP 调用必须设超时。修复后顺手把 `setInterval` 改成 `setTimeout` 递归(避免并发)+ 失败计数容错(避免偶发抖动中断长任务)。**
+
