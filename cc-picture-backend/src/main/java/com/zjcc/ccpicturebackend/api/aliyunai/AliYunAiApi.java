@@ -48,7 +48,9 @@ public class AliYunAiApi {
                 // 必须开启异步处理，设置为enable。
                 .header("X-DashScope-Async", "enable")
                 .header(Header.CONTENT_TYPE, ContentType.JSON.getValue())
-                .body(JSONUtil.toJsonStr(createOutPaintingTaskRequest));
+                .body(JSONUtil.toJsonStr(createOutPaintingTaskRequest))
+                // 设置超时（毫秒），避免阿里云慢响应时后端线程被无限期挂起
+                .timeout(15000);
         try (HttpResponse httpResponse = httpRequest.execute()) {
             if (!httpResponse.isOk()) {
                 log.error("请求异常：{}", httpResponse.body());
@@ -77,6 +79,8 @@ public class AliYunAiApi {
         }
         try (HttpResponse httpResponse = HttpRequest.get(String.format(GET_OUT_PAINTING_TASK_URL, taskId))
                 .header(Header.AUTHORIZATION, "Bearer " + apiKey)
+                // 设置超时（毫秒），避免阿里云慢响应时后端线程被无限期挂起
+                .timeout(15000)
                 .execute()) {
             if (!httpResponse.isOk()) {
                 throw new BusinessException(ErrorCode.OPERATION_ERROR, "获取任务失败");
