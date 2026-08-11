@@ -2,7 +2,7 @@
 <template>
   <div id="addSpacePage">
     <h2 style="margin-bottom: 16px">
-      {{ route.query?.id ? '修改空间' : '创建空间' }}
+      {{ route.query?.id ? '修改' : '创建' }} {{ SPACE_TYPE_MAP[spaceType] }}
     </h2>
     <a-form layout="vertical" :model="formData" @finish="handleSubmit">
       <a-form-item label="空间名称" name="spaceName">
@@ -46,10 +46,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
-import { SPACE_LEVEL_ENUM, SPACE_LEVEL_OPTIONS } from '@/constants/space'
+import { SPACE_LEVEL_ENUM, SPACE_LEVEL_OPTIONS, SPACE_TYPE_ENUM, SPACE_TYPE_MAP } from '@/constants/space'
 import { addSpaceUsingPost, getSpaceVoByIdUsingGet, listSpaceLevelUsingGet, updateSpaceUsingPost } from '@/api/spaceController'
 import { formatSize } from '@/utils'
 
@@ -80,6 +80,7 @@ const handleSubmit = async (values: any) => {
     // 创建
     res = await addSpaceUsingPost({
       ...formData,
+      spaceType: spaceType.value // 空间类型
     })
   }
   // 操作成功
@@ -142,6 +143,16 @@ onMounted(() => {
   getOldSpace()
 })
 
+// --- 团队空间 复用本页面 ---
+// 空间类别，默认为私有空间
+const spaceType = computed(() => {
+  if (route.query?.type) {
+    // 当我们访问 http://localhost:5173/add_space?type=1 的时候就创建团队空间
+    return Number(route.query.type)
+  } else {
+    return SPACE_TYPE_ENUM.PRIVATE
+  }
+})
 
 </script>
 

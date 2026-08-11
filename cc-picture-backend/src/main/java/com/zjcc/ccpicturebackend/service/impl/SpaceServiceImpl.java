@@ -106,7 +106,7 @@ public class SpaceServiceImpl extends ServiceImpl<SpaceMapper, Space>
                     SpaceUser spaceUser = new SpaceUser();
                     spaceUser.setSpaceId(space.getId());
                     spaceUser.setUserId(loginUser.getId());
-                    spaceUser.setSpaceRole(SpaceRoleEnum.ADMIN.getText());
+                    spaceUser.setSpaceRole(SpaceRoleEnum.ADMIN.getValue());
                     // spaceUser.setCreateTime(new Date()); // 需要手动设置吗？什么注解或方式能保证自动？
                     spaceUserService.save(spaceUser);
                 }
