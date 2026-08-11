@@ -76,11 +76,11 @@ public class SpaceAnalyzeServiceImpl implements SpaceAnalyzeService {
             // 封装返回结果
             SpaceUsageAnalyzeResponse analyzeResponse = new SpaceUsageAnalyzeResponse();
             analyzeResponse.setUsedSize(usedSize);
-            analyzeResponse.setMaxCount(usedCount);
+            analyzeResponse.setUsedCount(usedCount);
             // 公共图库无上限、无使用比例
             analyzeResponse.setMaxSize(null);
+            analyzeResponse.setMaxCount(null);
             analyzeResponse.setSizeUsageRatio(null);
-            analyzeResponse.setUsedCount(null);
             analyzeResponse.setCountUsageRatio(null);
             return analyzeResponse;
         } else {
