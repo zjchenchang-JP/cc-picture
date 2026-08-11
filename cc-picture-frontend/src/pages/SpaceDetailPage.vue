@@ -69,7 +69,7 @@ import { listPictureVoByPageUsingPost, searchPictureByColorUsingPost } from '@/a
 import { getSpaceVoByIdUsingGet } from '@/api/spaceController';
 import { formatSize } from '@/utils'
 import { message } from 'ant-design-vue';
-import { computed, onMounted, reactive, ref, h } from 'vue'
+import { computed, onMounted, reactive, ref, h, watch } from 'vue'
 import PictureList from '@/components/PictureList.vue'
 import PictureSearchForm from '@/components/PictureSearchForm.vue'
 import { ColorPicker } from 'vue3-colorpicker'
@@ -153,6 +153,23 @@ const fetchData = async () =>{
 
 // 页面加载时获取数据，请求一次
 onMounted(() => {
+  fetchData()
+})
+
+// ⭐ 处理「同组件复用」：从 /space/A 跳到 /space/B 时，Vue Router 复用同一个 SpaceDetailPage 实例，
+// 组件不会重新挂载、onMounted 不再触发 → 不重新拉数据，页面仍显示上一个空间的图片。
+// 用 watch 监听 id 变化，手动重置搜索条件并重新加载。
+watch(() => props.id, () => {
+  // 重置搜索条件，避免上个空间的分页/搜索关键词残留（如 A 翻到第 5 页、B 只有 2 页会查空）
+  searchParams.value = {
+    current: 1,
+    pageSize: 12,
+    sortField: 'createTime',
+    sortOrder: 'descend',
+  }
+  dataList.value = []
+  total.value = 0
+  fetchSpaceDetail()
   fetchData()
 })
 
