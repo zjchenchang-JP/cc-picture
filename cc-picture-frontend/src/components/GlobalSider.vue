@@ -74,7 +74,10 @@ const menuItems = computed(() => {
 const fetchTeamSpaceList = async () => {
   const res = await listMyTeamSpaceUsingPost()
   if (res.data.code === 0 && res.data.data) {
-    teamSpaceList.value = res.data.data
+    // 前端防御「我的团队」只展示团队空间，过滤掉 space_user 表里可能残留的私有空间记录
+    teamSpaceList.value = res.data.data.filter(
+      (item) => item.space?.spaceType === SPACE_TYPE_ENUM.TEAM
+    )
   } else {
     message.error('加载我的团队空间失败，' + res.data.message)
   }
