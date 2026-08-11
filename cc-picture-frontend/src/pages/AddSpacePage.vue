@@ -149,9 +149,12 @@ const spaceType = computed(() => {
   if (route.query?.type) {
     // 当我们访问 http://localhost:5173/add_space?type=1 的时候就创建团队空间
     return Number(route.query.type)
-  } else {
-    return SPACE_TYPE_ENUM.PRIVATE
   }
+  // 编辑场景：URL 没带 type，以接口返回的真实类型为准
+  if (oldSpace.value?.spaceType != null) {
+    return oldSpace.value.spaceType
+  }
+  return SPACE_TYPE_ENUM.PRIVATE
 })
 
 </script>

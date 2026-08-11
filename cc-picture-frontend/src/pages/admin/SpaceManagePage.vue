@@ -61,7 +61,7 @@
             <a-button type="link" :href="`/space_analyze?spaceId=${record.id}`" target="_blank">
               分析
             </a-button>
-            <a-button type="link" :href="`/add_space?id=${record.id}`" target="_blank">
+            <a-button type="link" :href="`/add_space?id=${record.id}&type=${record.spaceType}`" target="_blank">
               编辑
             </a-button>
             <a-button danger @click="doDelete(record.id)">删除</a-button>
