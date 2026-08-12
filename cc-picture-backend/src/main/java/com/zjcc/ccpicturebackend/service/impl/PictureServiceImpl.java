@@ -116,6 +116,9 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             pictureId = pictureUploadRequest.getId();
         }
         // 如果是更新图片要校验图片是否存在
+        // oldPicture 提到外层声明：更新场景下事务里需要用它算"大小差额"
+        // （替换图片文件时条数不变，只按 新大小-旧大小 的差额调整 totalSize）
+        Picture oldPicture = null;
         if (pictureId != null) {
             // 说明是更新
             // 版本v1.0 默认是管理员才能上传
@@ -123,7 +126,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             //         .exists();
             // ThrowUtils.throwIf(!exists, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
             // v2.0
-            Picture oldPicture = this.getById(pictureId);
+            oldPicture = this.getById(pictureId);
             ThrowUtils.throwIf(oldPicture == null, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
             // 仅上传者本人或管理员可编辑 权限校验逻辑
             if (!oldPicture.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
@@ -203,14 +206,26 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         }
         // v4.0 开启事务 更新额度，如果额度更新失败，也不用将图片记录保存
         Long finalSpaceId = spaceId;
+        // oldPicture 在 lambda 中引用，需 final 引用（替换图片用它算大小差额）
+        final Picture finalOldPicture = oldPicture;
         transactionTemplate.execute(status -> {
             boolean result = this.saveOrUpdate(picture);
             ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR, "图片上传失败");
             if (finalSpaceId != null) {
-                boolean update = spaceService.lambdaUpdate().eq(Space::getId, finalSpaceId)
-                        .setSql("totalSize = totalSize + " + picture.getPicSize())
-                        .setSql("totalCount = totalCount + 1")
-                        .update();
+                boolean update;
+                if (finalOldPicture != null) {
+                    // 更新（替换图片文件）：条数不变，只按"新大小 - 旧大小"的差额调整 totalSize
+                    long delta = picture.getPicSize() - finalOldPicture.getPicSize();
+                    update = spaceService.lambdaUpdate().eq(Space::getId, finalSpaceId)
+                            .setSql("totalSize = totalSize + (" + delta + ")")
+                            .update();
+                } else {
+                    // 新增图片：大小累加 + 条数 +1
+                    update = spaceService.lambdaUpdate().eq(Space::getId, finalSpaceId)
+                            .setSql("totalSize = totalSize + " + picture.getPicSize())
+                            .setSql("totalCount = totalCount + 1")
+                            .update();
+                }
                 ThrowUtils.throwIf(!update, ErrorCode.OPERATION_ERROR, "额度更新失败");
             }
             return null;
