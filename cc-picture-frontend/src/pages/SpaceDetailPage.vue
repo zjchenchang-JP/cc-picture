@@ -3,7 +3,7 @@
   <div id="spaceDetailPage">
     <!-- 空间信息 -->
     <a-flex justify="space-between">
-      <h2>{{ space.spaceName }}</h2>
+      <h2>{{ space.spaceName }}（{{ SPACE_TYPE_MAP[space.spaceType] }}）</h2>
       <a-space size="middle">
         <a-button
           type="primary"
@@ -11,6 +11,16 @@
           target="_blank"
         >
           + 创建图片
+        </a-button>
+        <a-button
+          v-if="space.spaceType == 1"
+          type="primary"
+          ghost
+          :icon="h(TeamOutlined)"
+          :href="`/spaceUserManage/${id}`"
+          target="_blank"
+        >
+          成员管理
         </a-button>
         <a-button
           type="primary"
@@ -75,7 +85,8 @@ import PictureSearchForm from '@/components/PictureSearchForm.vue'
 import { ColorPicker } from 'vue3-colorpicker'
 import 'vue3-colorpicker/style.css'
 import BatchEditPictureModal from '@/components/BatchEditPictureModal.vue';
-import { EditOutlined,BarChartOutlined } from '@ant-design/icons-vue'
+import { EditOutlined,BarChartOutlined,TeamOutlined } from '@ant-design/icons-vue'
+import { SPACE_TYPE_MAP } from '@/constants/space';
 
 interface Props {
   id: string | number
