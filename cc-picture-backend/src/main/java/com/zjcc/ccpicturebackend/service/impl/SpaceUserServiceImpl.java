@@ -4,6 +4,7 @@ import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.ObjUtil;
 import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.zjcc.ccpicturebackend.exception.BusinessException;
@@ -52,6 +53,10 @@ public class SpaceUserServiceImpl extends ServiceImpl<SpaceUserMapper, SpaceUser
         SpaceUser spaceUser = new SpaceUser();
         BeanUtil.copyProperties(spaceUserAddRequest,spaceUser);
         validSpaceUser(spaceUser,true);
+        // 角色为空时,默认兜底为浏览者
+        if (StrUtil.isBlank(spaceUser.getSpaceRole())) {
+            spaceUser.setSpaceRole(SpaceRoleEnum.VIEWER.getValue());
+        }
         // 操作数据库
         try {
             boolean result = this.save(spaceUser);
