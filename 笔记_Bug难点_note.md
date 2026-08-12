@@ -2471,3 +2471,304 @@ const pollOnce = async () => {
 
 > **AI 扩图轮询连踩两个 Bug:① 前端把 `clearPolling()` 放进 `finally`,导致每次轮询完都停,退化成单次请求——`finally` 是无条件收尾,不该放「终态才停」的条件逻辑;② 后端 Hutool 调阿里云没设 `.timeout()`,默认无限等待,阿里云一慢响应,后端线程永久卡死、请求 pending 到前端 axios 60 秒超时——所有外部 HTTP 调用必须设超时。修复后顺手把 `setInterval` 改成 `setTimeout` 递归(避免并发)+ 失败计数容错(避免偶发抖动中断长任务)。**
 
+---
+
+# 2026/08/11
+
+## Bug①：团队空间「自己都进不去」—— `getText()` 存角色，配置 key 对不上
+
+### 现象
+
+创建团队空间后，访问 `http://localhost:5173/space/{spaceId}`，浏览器同时干了两件事：
+
+1. 触发了 `http://localhost:8123/api/picture/list/page/vo` 请求；
+2. 这个请求抛了 `ErrorCode.NO_AUTH_ERROR`（无权限）。
+
+而且**创建者本人**都进不去——按设计创建者该自动是团队管理员，结果没权限。
+
+---
+
+### 先答第一个疑惑：为什么会触发 `picture/list/page/vo`？
+
+这是**前端页面主动发的**，不是意外。
+
+访问 `/space/:id` 渲染的是 `SpaceDetailPage.vue`。页面一挂载，`onMounted` 就调 `fetchData()`：
+
+```ts
+// SpaceDetailPage.vue
+const fetchData = async () => {
+  const params = {
+    spaceId: props.id,   // ← 把地址栏的 spaceId 带上
+    ...searchParams.value
+  }
+  const res = await listPictureVoByPageUsingPost(params)  // ← 就是 /api/picture/list/page/vo
+}
+onMounted(() => { fetchData() })
+```
+
+「一进空间详情页就拉图片列表」是设计好的行为（不然图片区是空的）。请求本身没问题，**问题在后端权限校验**。
+
+---
+
+### 再答第二个疑惑：为什么抛 `NO_AUTH_ERROR`？
+
+请求带 `spaceId` 到后端 `PictureController.listPictureVOByPage`：
+
+```java
+Long spaceId = pictureQueryRequest.getSpaceId();
+if (spaceId == null) {
+    // 公开图库，放行
+} else {
+    // 有 spaceId → 校验「有没有 picture:view 权限」
+    boolean hasPermission = StpKit.SPACE.hasPermission(SpaceUserPermissionConstant.PICTURE_VIEW);
+    ThrowUtils.throwIf(!hasPermission, ErrorCode.NO_AUTH_ERROR);  // ← 异常从这抛
+}
+```
+
+带 spaceId → 走 else。`hasPermission` 内部链路（团队空间分支）：
+
+```
+StpInterfaceImpl.getPermissionList
+  → 按 (userId, spaceId) 查 space_user 表，拿到 spaceRole
+  → SpaceUserAuthManager.getPermissionsByRole(spaceRole)
+  → 用 spaceRole 去 spaceUserAuthConfig.json 里按 key 匹配角色
+  → 匹配不到 → 返回空权限列表
+  → hasPermission("picture:view") = false → 抛 NO_AUTH_ERROR
+```
+
+---
+
+### 根因：写角色和读角色用的「语言」不一致
+
+| 环节 | 代码 | 实际值 |
+|---|---|---|
+| **写入**（`SpaceServiceImpl.java:109`，创建团队空间时） | `setSpaceRole(SpaceRoleEnum.ADMIN.getText())` | `"管理员"`（中文 text） |
+| **读取匹配**（`SpaceUserAuthManager:54-55`） | `spaceUserRole.equals(r.getKey())` | 配置文件 key 是 `"admin"`（英文） |
+
+`"管理员".equals("admin")` 永远 false → 角色匹配不到 → 返回空权限 → 即使是创建者（本意是管理员）也解析不出任何权限 → 抛 `NO_AUTH_ERROR`。
+
+全项目里**只有 `SpaceServiceImpl.java:109` 一处用了 `getText()`**，其他地方（`StpInterfaceImpl:75`、`SpaceUserAuthManager:73`）读取/兜底用的都是 `getValue()`，配置文件 key 也是英文。所以这是一个孤立的、明确的 bug。
+
+枚举对照（`SpaceRoleEnum`）：
+
+```
+VIEWER("浏览者", "viewer")   // getText→"浏览者"  getValue→"viewer"
+EDITOR("编辑者", "editor")
+ADMIN ("管理员", "admin")
+```
+
+配置文件认的是 `getValue()`（viewer/editor/admin），存进去的却用了 `getText()`（中文），永远对不上。
+
+---
+
+### 修复
+
+**1. 代码（根因）：** `SpaceServiceImpl.java:109` 把 `getText()` 改成 `getValue()`：
+
+```java
+spaceUser.setSpaceRole(SpaceRoleEnum.ADMIN.getValue());   // 存 "admin"
+```
+
+**2. 老数据（已被写脏的记录）：** 改代码前建过的团队空间，`space_user` 表里存的还是 "管理员"，光改代码不够，要手动修：
+
+```sql
+UPDATE space_user SET spaceRole = 'admin'  WHERE spaceRole = '管理员';
+UPDATE space_user SET spaceRole = 'editor' WHERE spaceRole = '编辑者';
+UPDATE space_user SET spaceRole = 'viewer' WHERE spaceRole = '浏览者';
+```
+
+> 状态：根因已定位、修复方案确定，**代码尚未落地**（待改 `getValue()` + 执行老数据 SQL）。
+
+---
+
+### 经验教训
+
+1. **枚举的 `getText()` 和 `getValue()` 别混用** —— 配置/匹配方约定好用哪个（本项目统一用 value 英文），写入方就得用同一个；否则字符串永远对不上，而且**静默失败**（不报错，权限直接为空，极难发现）。
+2. **「创建者本人都没权限」几乎一定是权限数据写错了** —— 设计上创建即赋权，结果自己都进不去，先查「写进去的值和校验时匹配的值是不是一套」。
+3. **权限类 bug 排查路径：跟着 `hasPermission` 往里钻** —— `hasPermission(xxx)` → `getPermissionList` → 看「角色从哪来（DB）」+「角色怎么翻译成权限（配置匹配）」，两端对一遍就能定位。
+
+> **一句话：团队空间创建者自己都进不去，根因是存角色用了 `getText()`（中文「管理员」）、匹配却用配置的英文 key（"admin"），永远对不上 → 权限列表为空 → `hasPermission(picture:view)` 为 false → 抛 `NO_AUTH_ERROR`。改成 `getValue()` 并修老数据即可。**
+
+---
+
+## Bug②：编辑团队空间，标题却显示「修改 私有空间」—— 拿到了真实类型却没用
+
+### 现象
+
+从「空间管理」点团队空间的「编辑」，URL 是 `/add_space?id=xxx`（**没带 type**），页面标题显示「修改 私有空间」，即使这个空间其实是团队空间。
+
+---
+
+### 根因：两层叠加，病根在编辑页「拿到数据却没用」
+
+**第一层：编辑入口没拼 type。**
+
+`SpaceManagePage.vue:64` 的编辑按钮跳转只带了 id：
+
+```html
+<a-button type="link" :href="`/add_space?id=${record.id}`" target="_blank">编辑</a-button>
+```
+
+所以 URL 没有 `type`。
+
+**第二层（真正的根因）：编辑页拿到真实类型了，却没用。**
+
+`AddSpacePage.vue` 的 `spaceType` 只看 URL 参数，没 type 就**写死成私有**：
+
+```ts
+const spaceType = computed(() => {
+  if (route.query?.type) {
+    return Number(route.query.type)
+  } else {
+    return SPACE_TYPE_ENUM.PRIVATE   // ← 没 type 就当私有
+  }
+})
+```
+
+而标题用的是它：`{{ route.query?.id ? '修改' : '创建' }} {{ SPACE_TYPE_MAP[spaceType] }}` → `SPACE_TYPE_MAP[0]` → "私有空间"。
+
+矛盾点在于：编辑时 `getOldSpace()` **已经从后端把老数据（含真实的 `spaceType`）拉到了 `oldSpace` 里**，可这个 computed 压根没去读它。手头有真值却没用，只信 URL。
+
+对照：侧边栏创建团队空间时 URL 是 `/add_space?type=1`，带了 type，走第一个分支能正常显示「创建 团队空间」。编辑入口没带，就露馅了。
+
+---
+
+### 修复
+
+**方案一（根因，改接收方）：** 让 `spaceType` 在 URL 没 type 时，回退用 `oldSpace` 的真实类型：
+
+```ts
+const spaceType = computed(() => {
+  if (route.query?.type) {
+    return Number(route.query.type)
+  }
+  if (oldSpace.value?.spaceType != null) {   // 编辑场景：以接口返回的真实类型为准
+    return oldSpace.value.spaceType
+  }
+  return SPACE_TYPE_ENUM.PRIVATE
+})
+```
+
+`oldSpace` 是 ref，接口数据回来后 computed 自动重算，标题自动纠正。一处改动覆盖所有跳转入口。
+
+**方案二（可选，改跳转方，让首屏不闪）：** 编辑按钮链接补上 type：
+
+```html
+<a-button type="link" :href="`/add_space?id=${record.id}&type=${record.spaceType}`" target="_blank">
+```
+
+> 状态：**两处都已改**（`AddSpacePage` 的 computed 根因修复 + `SpaceManagePage` 跳转补 type）。
+
+---
+
+### 经验教训
+
+1. **「复用页面 + URL 参数控制模式」时，编辑态要信任后端数据，别只靠 URL。** URL 参数可能缺失/被篡改，而接口拉回来的数据才是 source of truth。手头有真值却不用，是这类 bug 的通病。
+2. **computed 依赖 ref 会自动重算** —— `oldSpace` 是异步加载的 ref，computed 引用它，数据回来后标题自动从错变对，不用手动触发。这是响应式的天然优势。
+3. **跳转方和接收方都要自洽** —— 只改接收方（方案一）能兜底所有入口；同时改跳转方（方案二）让首屏就正确（不等接口返回的瞬间闪烁）。两个一起做最稳。
+
+> **一句话：编辑团队空间却显示「修改 私有空间」，根因是编辑入口没拼 type、加上 `AddSpacePage` 的 `spaceType` 只认 URL 参数（没 type 就写死私有），明明 `getOldSpace` 已经拉到了真实类型却没用上；修复让 computed 在没 URL type 时回退读 `oldSpace.spaceType`，并给编辑入口的跳转补上 type。**
+
+---
+
+## Bug③：切空间图片不刷新 —— Vue Router「同组件复用」，onMounted 不再触发
+
+### 现象
+
+访问私人空间 `/space/A`（3 张图）正常。接着从侧边栏点团队空间 `/space/B`（2 张图），**URL 变了，但图片不刷新**，还显示私人空间的 3 张图。可如果先点一下「空间管理」，再点团队空间——**一模一样的 URL `/space/B`，这次又能正常显示 2 张图了**。
+
+同一个 URL，两次结果不同。
+
+---
+
+### 根因：Vue Router「同组件复用」，组件实例不销毁、onMounted 不重新触发
+
+路由配置（`router/index.ts`）：
+
+```js
+{ path: '/space/:id', component: SpaceDetailPage, props: true }
+```
+
+所有 `/space/xxx` 都用**同一个 `SpaceDetailPage` 组件**。Vue Router 的规则：**前后两个路由若复用同一个组件，就不会销毁重建实例**，只是把新的 `:id` 响应式地更新到 `props.id`。
+
+而 `SpaceDetailPage` 的数据加载全在 `onMounted` 里：
+
+```ts
+onMounted(() => { fetchSpaceDetail() })
+onMounted(() => { fetchData() })
+```
+
+**`onMounted` 只在组件首次挂载时触发一次。** 组件实例没销毁，它就不会再触发 → `fetchData()` 不执行 → `dataList` 还停留在上一个空间的 3 张图 → 看起来"没刷新"。
+
+数据流：
+
+```
+私人空间 → 团队空间（直接点侧边栏）:
+  /space/A ──router.push──> /space/B
+  组件实例「不销毁」, 只更新 props.id (A→B)
+  onMounted 不触发 → fetchData 不执行 → 还是 A 的 3 张图 ❌
+```
+
+---
+
+### 为什么「先点空间管理」就好了？
+
+点「空间管理」跳到 `/admin/spaceManage`（`SpaceManagePage`，**不同的组件**）→ `SpaceDetailPage` 被卸载。再点团队空间 `/space/B` → `SpaceDetailPage` **重新挂载** → `onMounted` 触发 → `fetchData()` 执行 → 正常加载 2 张图。
+
+所以"绕一下空间管理"本质是**碰巧让组件重建**，规避了复用问题，不是真修好。侧边栏用的是 `router.push(key)`（SPA 跳转、不整页刷新），所以从 `/space/A` 直接到 `/space/B` 必然踩这个坑。
+
+---
+
+### 附带隐患：组件复用时状态残留
+
+组件不重建，`searchParams`、`dataList`、`total` 这些 ref 也都不重置。如果私人空间翻到了第 5 页，切到团队空间（只有 2 页），`current=5` 会直接查空。所以修这个 bug **不能只重新加载，还要重置搜索条件**。
+
+---
+
+### 修复：用 watch 监听 id 变化
+
+`props.id` 因 `props: true` 是响应式的，`watch` 能监听到它的变化。在 id 变化时重置状态 + 重新加载：
+
+```ts
+import { computed, onMounted, reactive, ref, h, watch } from 'vue'  // 引入 watch
+
+// 首次挂载仍用 onMounted（保留原逻辑）
+onMounted(() => { fetchData() })
+
+// ⭐ 处理「同组件复用」：/space/A → /space/B 时组件不重新挂载，onMounted 不触发
+watch(() => props.id, () => {
+  // 重置搜索条件，避免上个空间的分页/搜索关键词残留
+  searchParams.value = { current: 1, pageSize: 12, sortField: 'createTime', sortOrder: 'descend' }
+  dataList.value = []
+  total.value = 0
+  fetchSpaceDetail()
+  fetchData()
+})
+```
+
+> 状态：**已改**（`SpaceDetailPage.vue` 引入 `watch` + 新增 `watch(props.id)` 块）。
+
+---
+
+### 三种解法对比（都能解决，选其一）
+
+| 解法 | 怎么做 | 优点 | 缺点 |
+|---|---|---|---|
+| **A. watch(props.id)**（本例采用） | 在页面内 `watch(() => props.id, 重新加载)` | 精准、只影响当前页、可重置状态 | 要手动写重置逻辑 |
+| B. router-view 加 key | 布局里 `<router-view :key="$route.fullPath" />` | 一行搞定，强制每次重建组件 | **全局生效**，所有路由切换都重建，丢状态、性能差 |
+| C. onBeforeRouteUpdate | 组件内 `onBeforeRouteUpdate(to => { fetchData(to.params.id) })` | 路由专用钩子，语义清晰 | 要改函数签名接收新 id，改动稍大 |
+
+> 本例选 A：问题只出在 `/space/:id` 这一个动态路由页，没必要全局加 key（B 太重）；A 还能顺手重置 `searchParams`，正好治掉状态残留隐患。
+
+---
+
+### 经验教训
+
+1. **「动态路由参数页 + 数据在 onMounted 里加载」几乎必踩这个坑** —— 只要同组件、不同参数（`/space/A`→`/space/B`），`onMounted` 就不会再触发。这是 Vue Router 的经典机制，不是 bug。
+2. **`onMounted` 只触发一次，`watch` 才是「响应变化」** —— 首次加载用 `onMounted`，后续参数变化用 `watch(props.id)`，两者各管一段；或直接 `watch(..., { immediate: true })` 合二为一。
+3. **同组件复用 = 组件级状态不重置** —— `searchParams`/`dataList`/分页都会残留，切参数时除了重新加载，还要**显式重置这些状态**，否则会带着上个空间的分页/搜索条件查新空间。
+4. **「绕一下别的页面就正常」是同组件复用问题的典型症状** —— 绕路让组件卸载重建、onMounted 重新触发，所以"好了"。遇到"同 URL 时好时坏"，先想是不是组件复用。
+5. **`props: true` 时，路由参数是响应式 props** —— 所以 `watch(() => props.id)` 能监听到路由 `:id` 的变化，这是它能生效的前提。
+
+> **一句话：从 `/space/A` 点到 `/space/B`，Vue Router 复用同一个 `SpaceDetailPage` 实例、不重新挂载，`onMounted` 不再触发 → `fetchData()` 不执行 → 图片还是上个空间的；「先点空间管理」是因为跳到了别的组件、让 `SpaceDetailPage` 卸载重建、onMounted 重新触发才好的。修复用 `watch(props.id)` 在 id 变化时重置搜索条件 + 重新加载。**
+
