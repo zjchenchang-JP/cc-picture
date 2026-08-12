@@ -27,6 +27,16 @@
           allow-clear
         />
       </a-form-item>
+      <!-- 支持按空间类别搜索 -->
+      <a-form-item label="空间类别" name="spaceType">
+        <a-select
+            v-model:value="searchParams.spaceType"
+            :options="SPACE_TYPE_OPTIONS"
+            placeholder="请输入空间类别"
+            style="min-width: 180px"
+            allow-clear
+        />
+      </a-form-item>
       <a-form-item label="用户 id">
         <a-input v-model:value="searchParams.userId" placeholder="请输入用户 id" allow-clear />
       </a-form-item>
@@ -42,9 +52,19 @@
       :pagination="pagination"
       @change="doTableChange"
     >
+      <!-- columns 决定有哪些列、列长什么样；#bodyCell 决定某些列要不要特殊加工。
+          能用默认值就直接用
+          #bodyCell 插槽："有没有针对 spaceLevel 的自定义渲染？"
+          有 → 用自定义的（比如 SPACE_LEVEL_MAP[record.spaceLevel]）；
+          没有 → 退化成默认行为，直接显示 record.spaceLevel，也就是显示个 0
+      -->
       <template #bodyCell="{ column, record }">
         <template v-if="column.dataIndex === 'spaceLevel'">
           <div>{{ SPACE_LEVEL_MAP[record.spaceLevel] }}</div>
+        </template>
+        <!-- 空间类别 -->
+        <template v-if="column.dataIndex === 'spaceType'">
+          <a-tag>{{ SPACE_TYPE_MAP[record.spaceType] }}</a-tag>
         </template>
         <template v-if="column.dataIndex === 'spaceUseInfo'">
           <div>大小：{{ formatSize(record.totalSize) }} / {{ formatSize(record.maxSize) }}</div>
@@ -76,7 +96,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { deleteSpaceUsingPost, listSpaceByPageUsingPost } from '@/api/spaceController'
 import { message } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { SPACE_LEVEL_MAP, SPACE_LEVEL_OPTIONS } from '../../constants/space'
+import { SPACE_LEVEL_MAP, SPACE_LEVEL_OPTIONS, SPACE_TYPE_MAP, SPACE_TYPE_OPTIONS } from '../../constants/space'
 import { formatSize } from '../../utils'
 
 const columns = [
@@ -92,6 +112,10 @@ const columns = [
   {
     title: '空间级别',
     dataIndex: 'spaceLevel',
+  },
+  {
+    title: '空间类别',
+    dataIndex: 'spaceType',
   },
   {
     title: '使用情况',

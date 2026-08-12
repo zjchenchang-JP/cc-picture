@@ -27,6 +27,7 @@ const checkUserSpace = async () => {
     userId: loginUser.id,
     current: 1,
     pageSize: 1,
+    spaceType: 0, // spaceType: 0 只查私人空间 → 用户从这个入口永远进不去团队空间；
   })
   if (res.data.code === 0) {
     // 如果用户已登录，会获取该用户已创建的空间
