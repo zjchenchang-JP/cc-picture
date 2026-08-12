@@ -73,7 +73,7 @@
                 <EditOutlined />
               </template>
             </a-button>
-            <a-button v-if="canEdit" danger @click="doDelete">
+            <a-button v-if="canDelete" danger @click="doDelete">
               删除
               <template #icon>
                 <DeleteOutlined />
@@ -111,6 +111,7 @@ import { downloadImage, formatSize, toHexColor} from '@/utils'
 import { useLoginUserStore } from '@/stores/useLoginUserStore'
 import { DeleteOutlined, EditOutlined, DownloadOutlined,ShareAltOutlined } from '@ant-design/icons-vue'
 import ShareModal from '@/components/ShareModal.vue'
+import { SPACE_PERMISSION_ENUM } from '@/constants/space'
 
 // 图片详情⁡⁡⁡页要展示的图片是根据 ⁠⁠⁠id 而变化的，使用动态路由。
 // 在页面​​​中可以使用 props⁠⁠⁠ 获取到动态的参数
@@ -145,16 +146,16 @@ const fetchPictureDetail = async () => {
 // 权限判⁡⁡⁡断逻辑, can⁠E⁠d⁠it 的值为 true ​表示有​编辑和​删⁠除权限
 const loginUserStore = useLoginUserStore()
 // 是否具有编辑权限
-const canEdit = computed(() => {
-  const loginUser = loginUserStore.loginUser
-  // 未登录
-  if (!loginUser) {
-    return false
-  }
-  // 仅本人或管理员可编辑
-  const user = picture.value.user ?? {}
-  return loginUser.id === user.id || loginUser.userRole === 'admin'
-})
+// const canEdit = computed(() => {
+//   const loginUser = loginUserStore.loginUser
+//   // 未登录
+//   if (!loginUser) {
+//     return false
+//   }
+//   // 仅本人或管理员可编辑
+//   const user = picture.value.user ?? {}
+//   return loginUser.id === user.id || loginUser.userRole === 'admin'
+// })
 
 const router = useRouter()
 
@@ -221,6 +222,21 @@ const doShare = () => {
 onMounted(() => {
   fetchPictureDetail()
 })
+
+/**
+ * 权限管理
+ */
+// 通用权限检查函数
+function createPermissionChecker(permission: string) {
+  return computed(() => {
+    return (picture.value.permissionList ?? []).includes(permission)
+  })
+}
+
+// 定义权限检查
+const canEdit = createPermissionChecker(SPACE_PERMISSION_ENUM.PICTURE_EDIT)
+const canDelete = createPermissionChecker(SPACE_PERMISSION_ENUM.PICTURE_DELETE)
+
 </script>
 
 <style scoped>
