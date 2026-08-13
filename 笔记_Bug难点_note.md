@@ -3161,3 +3161,461 @@ List<String> permissionList = spaceUserAuthManager.getPermissionList(space, logi
 
 > **一句话：详情页改用 `permissionList` 控制按钮显隐后，公共图库本人图片的编辑/删除按钮消失——根因不是"新逻辑不校验登录/本人"，而是算显隐列表的 `SpaceUserAuthManager.getPermissionList(space, loginUser)` 入参没有 picture，公共图库下一刀切只认管理员；而真正鉴权的 `StpInterfaceImpl` 能拿 pictureId 反查、判得了本人，于是出现"接口允许、按钮不显示"的割裂。修复：给 Manager 加带 picture 的重载，公共图库分支补上"本人上传者"，Controller 改调新重载；老调用点传 null 不受影响。这是 UX 回归（前端按钮显隐不是安全边界），不是漏洞。**
 
+---
+
+# 2026/08/13
+
+## 一、权限校验统一交 Sa-Token：拆掉 Service 层与团队空间冲突的硬编码
+
+### 现象：团队空间的 admin / editor 传不了图、编辑不了
+
+引入团队空间（`SpaceUser` + Sa-Token RBAC）后，按设计 editor / admin 成员应能上传、编辑空间内图片。实测：**除了空间创建人本人，其他 admin、editor 全被挡**，抛「没有空间权限」。
+
+### 根因：Service 层留了一套「团队空间上线前」的硬编码权限，与 Controller 的 Sa-Token 注解冲突
+
+权限被校验了**两遍**，后面那道更严，把 Sa-Token 放行的合法成员误杀了：
+
+| 层 | 代码 | 判断依据 |
+|---|---|---|
+| Controller | `@SaSpaceCheckPermission(PICTURE_UPLOAD)` | Sa-Token 查 `SpaceUser` 角色，editor/admin 放行 |
+| Service（`PictureServiceImpl` 原 `:103`） | `!loginUser.getId().equals(oldSpace.getUserId())` | 只认 `space.userId`（**空间创建人**）|
+
+注释自己就暴露了它的年纪：「现阶段空间的管理员就是空间的创建人，**后续会增加团队空间概念**」——团队空间做出来后，这段就成了「只认创建人」的过时校验，把所有非创建人的成员一律拦下。
+
+同类硬编码还有三处（`PictureServiceImpl`）：
+
+- 原 `:132`（更新图片分支）：只认**图片上传者**本人或系统管理员
+- 原 `:617`（searchPictureByColor）、原 `:700`（validateBatchEditRequest）：只认空间创建人
+
+根因都一样：**Sa-Token 已在 Controller 层接管权限，Service 层这些手写校验是过时的重复，语义更窄，反而误杀 Sa-Token 放行的人。**
+
+### 改动：删 Service 硬编码，权限统一交 Sa-Token
+
+把 4 处硬编码删掉，Service 层只保留「空间存在性」校验，权限完全由 Controller 的 `@SaSpaceCheckPermission` 把关：
+
+| 位置 | 改动 |
+|---|---|
+| uploadPicture（原 `:103`） | 删，交 `@SaSpaceCheckPermission(PICTURE_UPLOAD)` |
+| uploadPicture 更新分支（原 `:132`） | 删，同上 |
+| searchPictureByColor（原 `:617`） | 删，交 `@SaSpaceCheckPermission(PICTURE_VIEW)` |
+| validateBatchEditRequest（原 `:700`） | 删，交 `@SaSpaceCheckPermission(PICTURE_EDIT)` |
+
+为什么不在 Service 层「改成查 SpaceUser 角色」：那等于把 `StpInterfaceImpl.getPermissionList` 的三分支逻辑再手写一遍，两套逻辑迟早脱节——今天的 bug 就是这么来的。**一处管权限（Controller 注解），别处只管业务**，才不易腐化。
+
+### 关键发现：`/edit/batch/metadata` 之前**完全没有权限注解**
+
+删 `:700` 前必须确认它对应的 Controller 有注解兜底，否则就是制造权限真空。一查发现：`batchEditPictureMetadata`（`/edit/batch/metadata`）**既没有 `@SaSpaceCheckPermission` 也没有 `@AuthCheck`**，全靠 Service `:700` 那行兜着。直接删 `:700` → 这个接口裸奔，任何登录用户都能批量改别人空间的图。
+
+正确做法：**先给 Controller 补注解，再删 Service 硬编码**。
+
+### 进一步：批量编辑改成「仅空间管理员」——新增独立权限码 `picture:batchEdit`
+
+补注解时面临选择：批量编辑该用哪个权限码？
+
+- `PICTURE_EDIT`：editor 和 admin 都有 → editor 也能批量编辑，不符合「只让管理者批量改」的诉求。
+- 复用 `SPACE_USER_MANAGE`：只有 admin 有，能用，但语义是「成员管理」，拿来卡「批量编辑图片」是 hack。
+- **新增 `PICTURE_BATCH_EDIT`（`picture:batchEdit`）**：语义清晰，只配给 admin，符合 RBAC。
+
+选第三种，改三处：
+
+1. `SpaceUserPermissionConstant` 加常量 `PICTURE_BATCH_EDIT = "picture:batchEdit"`
+2. `spaceUserAuthConfig.json`：permissions 加一条；**admin** 角色的 permissions 加上它（editor/viewer 不加）
+3. `PictureController` 的 `/edit/batch` 和 `/edit/batch/metadata` 两个批量接口注解都改成 `PICTURE_BATCH_EDIT`
+
+效果：editor 调批量编辑 → `getPermissionList` 返回的权限码不含 `picture:batchEdit` → Sa-Token 匹配失败 → 拒绝；admin → 含 → 放行。
+
+> 顺手把同类的 `/edit/batch`（editPictureByBatch）也一起改了——它和 `/edit/batch/metadata` 都是「批量修改」，只改一个会导致 editor 能用前者、不能用后者，语义割裂。
+
+### 经验教训
+
+1. **权限要有唯一真相源**。项目既然用了 Sa-Token RBAC，Controller 注解就是权限的唯一来源；Service 层再写一遍权限，语义一旦和 Sa-Token 脱节，就从「补强」变成「误杀」。本案 4 处硬编码全是这种「过时的重复」。
+2. **删 Service 层权限校验前，必须确认对应 Controller 有注解兜底**。`/edit/batch/metadata` 就是因为没注解，差点被删成权限真空——纵深防御不是「多写几道冲突的校验」，而是「每一层都正确且不缺位」。
+3. **高危操作用独立权限码，别拿别的凑合**。「批量编辑只给 admin」应新增 `picture:batchEdit` 只配给 admin，而不是拿 `spaceUser:manage` 顶替——语义错位的权限码是未来的坑。
+4. **同类接口的权限要一致**。`/edit/batch` 和 `/edit/batch/metadata` 都是批量编辑，要么都放开要么都限制，否则会出现「editor 能用 A 接口却不能用 B 接口」的诡异现象。
+5. **注释里的「后续会做」是技术债标记**。「后续会增加团队空间概念」——团队空间真做出来时，这段旧校验就得同步退役，否则就成了本案的 bug。
+
+> **一句话：团队空间 admin/editor 传不了图，根因是 Service 层留着一套「团队空间上线前、只认创建人」的硬编码权限，和 Controller 的 Sa-Token 注解冲突、更严，把 Sa-Token 放行的人又拦了。删掉 Service 4 处硬编码、权限统一交 `@SaSpaceCheckPermission`；途中发现 `/edit/batch/metadata` 根本没注解（补上），并把批量编辑收敛为「仅空间管理员」——新增 `picture:batchEdit` 权限码只配给 admin，两个批量接口共用。**
+
+---
+
+## 二、一个 editor / admin 请求的权限全链路：`@SaSpaceCheckPermission` 如何被触发与判断
+
+> 本节把散落在前面笔记（07/07 的决策树、07/12 的注解流程）的知识点串成**一条完整的请求生命周期**，并以「editor 和 admin 各调一次 `/edit/batch/metadata`」为主线，看权限是怎么一步步判定出「editor 拒、admin 过」的。
+
+### 0. 全景：一次请求要过的「四道门」
+
+```
+HTTP 请求
+  │
+  ▼ ① 拦截 + 登录态
+  SaInterceptor.preHandle  ── 拦 /**（SaTokenConfigure 注册）
+  │
+  ▼ ② 注解解析（组合注解穿透）
+  getMergedAnnotation  ── 把 @SaSpaceCheckPermission 合成 @SaCheckPermission
+  │
+  ▼ ③ 权限数据加载（你写的 StpInterfaceImpl）
+  StpInterfaceImpl.getPermissionList(loginId, "space")  ── 返回"这个用户对这个空间"的权限码列表
+  │
+  ▼ ④ 权限匹配（Sa-Token 内部干）
+  permissionList.contains(注解上的 value) ?  放行 : 抛 NotPermissionException
+  │
+  ▼ 通过 → 进入 Controller 方法体
+```
+
+关键认知：**你只写了 ③（提供权限数据），①②④ 都是 Sa-Token 框架干的。** 你和 Sa-Token 的契约就是 `StpInterface` 这个接口——给它 loginId，它问你要权限码列表。
+
+### 1. 准备阶段（应用启动时，一次性）
+
+| 组件 | 干什么 | 代码 |
+|---|---|---|
+| `SaTokenConfigure.addInterceptors` | 注册 `SaInterceptor` 拦所有请求 `/**`，**打开注解式鉴权总开关** | `SaTokenConfigure.java:20` |
+| `SaTokenConfigure.rewriteSaStrategy`（`@PostConstruct`）| 把 Sa-Token 取注解的方式改成 `AnnotatedElementUtils.getMergedAnnotation`，**开启注解合并** | `:28-30` |
+| `SpaceUserAuthManager` 的 `static` 块 | 读 `spaceUserAuthConfig.json` 进全局常量，运行时只读内存 | `SpaceUserAuthManager` |
+
+为什么第 2 步必须做？因为 `@SaSpaceCheckPermission` 是**组合注解**（它自己上面标了 `@SaCheckPermission(type=SPACE_TYPE)`）。Sa-Token 默认只认 `@SaCheckPermission`，不认识你自定义的 `@SaSpaceCheckPermission`；开了 `getMergedAnnotation`，才能「穿透」组合注解，把 `@SaSpaceCheckPermission` 当成 `@SaCheckPermission` 处理。
+
+### 2. 注解合并：`@SaSpaceCheckPermission` → 虚拟的 `@SaCheckPermission`
+
+`@SaSpaceCheckPermission` 的定义（`annotation/SaSpaceCheckPermission.java`）：
+
+```java
+@SaCheckPermission(type = StpKit.SPACE_TYPE)   // ← 元注解：固定 space 体系
+public @interface SaSpaceCheckPermission {
+    @AliasFor(annotation = SaCheckPermission.class) String[] value() default {};
+    @AliasFor(annotation = SaCheckPermission.class) SaMode mode() default SaMode.AND;
+    @AliasFor(annotation = SaCheckPermission.class) String[] orRole() default {};
+}
+```
+
+以 `/edit/batch/metadata` 上的 `@SaSpaceCheckPermission(PICTURE_BATCH_EDIT)` 为例，合并后等价于一个虚拟的：
+
+```java
+@SaCheckPermission(type = "space", value = "picture:batchEdit")
+```
+
+- `type = StpKit.SPACE_TYPE`：告诉 Sa-Token 用 **space 账号体系**的 `StpLogic`（多账号体系下，space 登录和普通登录是分开的）。
+- `value`：要校验的权限码，通过 `@AliasFor` 从 `@SaSpaceCheckPermission.value` 桥接过来。
+- 这样 Controller 上就不用每次都写 `type="space"`，注解封装了「空间权限」这个语义。
+
+### 3. 触发校验：按 `type` 路由到你的 `getPermissionList`
+
+Sa-Token 拿到合并后的 `@SaCheckPermission(type="space", value="picture:batchEdit")`，要做的事就是：
+
+> 「在 **space** 体系下，当前登录用户有没有 **picture:batchEdit** 这个权限？」
+
+它调 `StpKit.SPACE.getPermissionList(loginId)`，而 `StpKit.SPACE` 这个 `StpLogic` 会把请求转交给**你写的 `StpInterfaceImpl.getPermissionList(loginId, "space")`**（Sa-Token 通过 `StpInterface` 接口找到你的实现类，因为它是 `@Component`）。
+
+**这就是分工线**：Sa-Token 负责调、负责匹配；你负责「给 loginId 算出它拥有哪些权限码」。
+
+### 4. `getPermissionList` 内部：一棵「层层定位」的决策树（核心）
+
+这是整个权限系统的「大脑」。它要回答的唯一问题是：**「这个用户，对这次请求涉及的资源，有哪些权限？」** 注意它**不判断操作类型（增删改查）**——操作类型由注解的 `value` 决定，方法本身只负责产出权限码列表。
+
+逐段（`StpInterfaceImpl.java`）：
+
+**a) 体系校验（`:70`）**：`loginType != "space"` → 返回空（拒绝）。非 space 体系不给 space 权限，安全默认。
+
+**b) 解析请求上下文 `getAuthContextByRequest()`（`:197`）**：从当前 HTTP 请求抠出 `spaceId / pictureId / spaceUserId`。
+
+- body 是 JSON → 反序列化成 `SpaceUserAuthContext`；是表单/query → 参数 Map 转。
+- 关键：RESTful 路径里的 `id`（`/picture/123`）是图片 id 还是空间 id？靠**路径前缀翻译**（`:231` switch）：`/picture/*`→pictureId、`/spaceUser/*`→spaceUserId、`/space/*`→spaceId。
+- `/edit/batch/metadata` 的请求体里直接带了 `spaceId`（`PictureEditByBatchRequest` 有 spaceId 字段），所以能直接解析到，不用走路径翻译。
+
+**c) 全空放行（`:79`）**：请求没带任何资源 id（列表查询等）→ 不涉及具体空间资源 → 返回 admin 全权限（放行本层）。
+
+**d) 取登录用户 userId（`:83-87`）**：从 Sa-Token space 会话里拿。
+
+**e) 层层降级定位资源**（决策树主干）：
+
+- 上下文有现成的 `spaceUser` 对象 → 直接用它的角色（`:90`）
+- 有 `spaceUserId`（操作某条成员记录）→ 先查出目标成员拿 spaceId，再按 (spaceId, 当前userId) 查**当前用户**的成员记录，按**当前用户自己的角色**算权限（`:101`）。查不到成员但**是系统管理员**→ 放行（`:115`，这是 07/07 笔记之后补的系统管理员兜底分支）
+- 有 `spaceId` → 直接用
+- 没 `spaceId`、有 `pictureId` → 反查图片拿 spaceId（`:132`）；图片 `spaceId==null`（公共图库）→ 本人/系统管理员放行，否则只读（`:140`）
+
+**f) 拿到 spaceId 后按空间类型分（`:156`）**：
+
+- **私有空间**：`space.userId`（拥有者）本人或系统管理员 → 放行；否则拒绝（`:157`）
+- **团队空间**：按 (userId, spaceId) 查 `SpaceUser` 成员记录 → 拿 `spaceRole` → `getPermissionsByRole(spaceRole)` 返回该角色的权限码（`:164`）。**不是成员 → 空（拒绝）。**
+
+对于「团队空间里调 `/edit/batch/metadata`」：走到 f 的团队空间分支 → 查到当前用户的 `SpaceUser.spaceRole`（admin/editor/viewer）→ `getPermissionsByRole` 用这个角色去 `spaceUserAuthConfig.json` 匹配，返回该角色的权限码列表。
+
+### 5. 权限匹配：Sa-Token 内部 `contains`（你不用写）
+
+`getPermissionList` 返回列表后，Sa-Token 在 `StpLogic` 里做（伪码）：
+
+```java
+public void checkPermission(String permission) {
+    if (!getPermissionList(loginId).contains(permission)) {
+        throw new NotPermissionException(permission, loginType);  // 不含 → 抛异常 → 全局异常处理 → 返回"无权限"
+    }
+}
+```
+
+要校验的是 `picture:batchEdit`，就 `permissionList.contains("picture:batchEdit")`。没有魔法，就是字符串包含判断。
+
+### 6. 实战推演：editor vs admin 调 `/edit/batch/metadata`
+
+假设两人都是团队空间 X 的成员，调 `POST /api/picture/edit/batch/metadata`，body 带 `spaceId=X`：
+
+| 步骤 | editor 角色 | admin 角色 |
+|---|---|---|
+| ① 注解合并 | `@SaCheckPermission(type=space, value="picture:batchEdit")` | 同左 |
+| ② 路由 | `getPermissionList(uid, "space")` | 同左 |
+| ③ 解析上下文 | body 有 spaceId=X → spaceId=X | 同左 |
+| ④ 决策树 | 团队空间分支 → 查 SpaceUser → spaceRole="editor" | → spaceRole="admin" |
+| ⑤ 角色→权限码 | `getPermissionsByRole("editor")` = `[view, upload, edit, delete]` | `getPermissionsByRole("admin")` = `[manage, view, upload, edit, delete, batchEdit]` |
+| ⑥ Sa-Token 匹配 | 列表含 `picture:batchEdit`？**否** → 抛 `NotPermissionException` → 拒绝 | 含？**是** → 放行 |
+| 结果 | ❌ 无权限 | ✅ 进入方法体执行 |
+
+差异的根源在第 ⑤ 步：`picture:batchEdit` 在 json 里**只配给了 admin**，editor 的权限码列表里天然没有它。所以「只让管理者批量编辑」不是靠代码里写 `if (是 admin)`，而是靠**权限码的角色分配**——这正是 RBAC 的力量：改配置（json）就能调权限，Controller 和 Service 一行不动。
+
+### 7. 几个容易踩的认知点
+
+1. **`getPermissionList` 不判断「操作类型」，只判断「资源归属 + 角色」**。操作类型（能不能批量编辑）由注解 `value="picture:batchEdit"` 决定，方法本身不知道这次是增是删。
+2. **权限码是字符串，匹配就是 `contains`**。Sa-Token 拿你给的列表和注解上的字符串做包含判断，没有别的魔法。
+3. **「放行」分两种**：返回 admin 全权限（`ADMIN_PERMISSIONS`）= 本层放行；返回空 = 本层拒绝；中间值（某角色的权限码）= 按角色受限。
+4. **决策树靠「请求带的资源 id」层层降级**：spaceUserId → spaceId → pictureId。`getAuthContextByRequest` 靠反射读标准字段名（`spaceId/pictureId/spaceUserId`）解析资源，**写操作接口的请求体必须用这些标准字段名**，否则解析不到 → 误判「无资源」→ 兜底放行（这是该方案的约定型脆弱点，07/07 笔记 Q3 详述）。
+5. **系统管理员和空间管理员是两套体系**：系统管理员（`userRole=admin`，`userService.isAdmin`）在私有空间、公共图库、成员管理边界处有「兜底放行」；空间管理员（`SpaceUser.spaceRole=admin`）的权限来自 json 配置。别混淆。
+
+### 8. 一句话总结
+
+> **请求 → SaInterceptor 拦 → `getMergedAnnotation` 把 `@SaSpaceCheckPermission` 穿透合并成 `@SaCheckPermission(type=space, value=权限码)` → Sa-Token 按 type 调你写的 `StpInterfaceImpl.getPermissionList` → 解析请求拿 spaceId、查 SpaceUser 角色、用 `SpaceUserAuthManager`（读 json）把角色转成权限码列表 → Sa-Token 用 `list.contains(value)` 判定 → 含则放行、不含抛 `NotPermissionException`。editor 和 admin 的差别，最终只是 json 里 `picture:batchEdit` 配给了谁——改配置即可调权限，这正是 RBAC 的意义。**
+
+---
+
+## 三、源码逐行追踪：请求每一步到底调了哪段代码
+
+> 上一节讲了「判定逻辑」，这一节把链路上**每一步**落到具体源码——以 `editor` 调 `POST /api/picture/edit/batch/metadata` 被拒、`admin` 调同一个接口被放行为例，按时间顺序把涉及的代码一段段摆出来。标 📦 的是项目源码（带文件:行号），标 🔧 的是 Sa-Token 框架源码（在 jar 里，这里给关键签名/伪码）。
+
+### 第 0 步｜前端发出请求
+
+📦 `cc-picture-frontend/src/request.ts:5-9`（axios 实例）
+
+```ts
+const myAxios = axios.create({
+  baseURL: 'http://localhost:8123',
+  timeout: 60000,
+  withCredentials: true   // ★ 关键：跨域请求携带 cookie
+})
+```
+
+`withCredentials: true` 是这条链路能跑起来的前提——Sa-Token 默认把登录凭证 `satoken` 写在 **cookie** 里，跨域（前端 5173 → 后端 8123）若不带 cookie，后端根本拿不到登录态，第 1 步的拦截器就会因"未登录"直接挡下，轮不到权限校验。
+
+📦 `cc-picture-frontend/src/api/pictureController.ts:50-64`（接口封装）
+
+```ts
+/** batchEditPictureMetadata POST /api/picture/edit/batch/metadata */
+export async function batchEditPictureMetadataUsingPost(body: API.PictureEditByBatchRequest, ...) {
+  return request<API.BaseResponseBatchEditResult_>(
+    '/api/picture/edit/batch/metadata',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, data: body, ... }
+  )
+}
+```
+
+`body` 是 `PictureEditByBatchRequest`，里面带着 `spaceId`——**这个 spaceId 是后面第 4 步判定"在哪个空间、什么角色"的入口**。请求带着 cookie（satoken）+ body（含 spaceId）发出。
+
+### 第 1 步｜后端拦截器拦下请求（注解鉴权的总开关）
+
+📦 `SaTokenConfigure.java:16-21`
+
+```java
+@Override
+public void addInterceptors(InterceptorRegistry registry) {
+    // 注册 Sa-Token 拦截器，打开注解式鉴权功能
+    registry.addInterceptor(new SaInterceptor()).addPathPatterns("/**");
+}
+```
+
+`/**` = 拦所有请求。`SaInterceptor` 是 Sa-Token 的 MVC 拦截器，它在 Controller 方法执行**前**触发（`preHandle`），负责"登录校验 + 扫方法上的 Sa-Token 注解并执行"。**没有这一行，方法上写再多 `@SaSpaceCheckPermission` 都不会生效。**
+
+🔧 框架内：`SaInterceptor.preHandle` → 路由到 `SaAnnotationStrategy`（注解策略）→ 去找目标方法 `batchEditPictureMetadata` 上的 Sa-Token 注解。
+
+### 第 2 步｜注解合并：让框架"认识"`@SaSpaceCheckPermission`
+
+难点在这：方法上标的是 `@SaSpaceCheckPermission`，但 Sa-Token 只认它自带的 `@SaCheckPermission`。所以要先"穿透合并"。
+
+📦 `SaTokenConfigure.java:23-31`（启动时改写取注解的方式）
+
+```java
+@PostConstruct
+public void rewriteSaStrategy() {
+    SaAnnotationStrategy.instance.getAnnotation = (element, annotationClass) -> {
+        return AnnotatedElementUtils.getMergedAnnotation(element, annotationClass);
+    };
+}
+```
+
+把 Sa-Token 默认的"直接取注解"换成 Spring 的 `getMergedAnnotation`（支持组合注解穿透）。**没有这步，下面的自定义注解会被框架无视，权限完全不生效。**
+
+📦 `SaSpaceCheckPermission.java:17,26-27`（自定义注解长这样）
+
+```java
+@SaCheckPermission(type = StpKit.SPACE_TYPE)   // 元注解：标在注解上的注解，固定 space 体系
+public @interface SaSpaceCheckPermission {
+    @AliasFor(annotation = SaCheckPermission.class) String[] value() default {};
+    ...
+}
+```
+
+`@AliasFor` 把 `SaSpaceCheckPermission.value` 桥接到 `SaCheckPermission.value`。
+
+📦 `StpKit.java:17,27`（type 路由的依据）
+
+```java
+public static final String SPACE_TYPE = "space";
+public static final StpLogic SPACE = new StpLogic(SPACE_TYPE);
+```
+
+合并后，框架眼中的 `batchEditPictureMetadata` 等价于标了：
+
+```java
+@SaCheckPermission(type = "space", value = "picture:batchEdit")
+```
+
+### 第 3 步｜框架按 `type` 路由，触发权限校验
+
+🔧 框架内（`SaAnnotationStrategy` + `StpLogic`，伪码）：
+
+```java
+// SaAnnotationStrategy 根据 type 选 StpLogic：type="space" → StpKit.SPACE
+StpLogic logic = StpKit.SPACE;
+logic.checkPermission("picture:batchEdit");   // 注解 value 传进来
+
+// StpLogic.checkPermission 内部：
+public void checkPermission(String permission) {
+    List<String> list = getPermissionList(loginId);          // ← 第 4 步：转交给你
+    if (!list.contains(permission)) {
+        throw new NotPermissionException(permission, type);  // ← 第 6/7 步：不含就抛
+    }
+}
+```
+
+**分工线就在 `getPermissionList` 这里**：框架调它、用它返回的列表做 `contains`；列表怎么来，框架不管，转交给实现了 `StpInterface` 接口的 Bean——也就是你的 `StpInterfaceImpl`（`@Component` + `implements StpInterface`，Sa-Token 启动时自动发现）。
+
+### 第 4 步｜`StpInterfaceImpl.getPermissionList`：本次请求走这条决策树（核心）
+
+框架调你的 `getPermissionList(loginId, "space")`。本次请求 body 带 `spaceId`，走的是「团队空间分支」。把实际经过的代码段摆出来：
+
+📦 `StpInterfaceImpl.java:67-81`（前置：体系校验 + 解析上下文 + 算好 admin 全权限备用）
+
+```java
+public List<String> getPermissionList(Object loginId, String loginType) {
+    if (!StpKit.SPACE_TYPE.equals(loginType)) return new ArrayList<>();   // 非 space 体系 → 拒
+
+    List<String> ADMIN_PERMISSIONS = spaceUserAuthManager.getPermissionsByRole(SpaceRoleEnum.ADMIN.getValue());
+
+    SpaceUserAuthContext authContext = getAuthContextByRequest();         // ← 从 HTTP 请求抠 spaceId
+    if (isAllFieldsNull(authContext)) return ADMIN_PERMISSIONS;           // 无资源 id → 放行(查询类)
+
+    User loginUser = (User) StpKit.SPACE.getSessionByLoginId(loginId).get(USER_LOGIN_STATE);
+    Long userId = loginUser.getId();
+    ...
+```
+
+`getAuthContextByRequest()`（`:197`）把 body 里的 `spaceId` 解析到 `authContext.spaceId`（JSON body → 反序列化成 `SpaceUserAuthContext`）。所以本次请求 `authContext.spaceId = X`，**不会**进 `isAllFieldsNull` 的放行分支，继续往下。
+
+📦 `StpInterfaceImpl.java:124`（spaceId 非空，直接拿到，跳过 pictureId 反查）
+
+```java
+Long spaceId = authContext.getSpaceId();     // = X，直接拿到
+if (spaceId == null) { ... /* pictureId 反查，本次不走 */ }
+```
+
+📦 `StpInterfaceImpl.java:151-174`（按空间类型分——本次是团队空间，走 else）
+
+```java
+Space space = spaceService.getById(spaceId);
+if (space == null) throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "未找到空间信息");
+
+if (space.getSpaceType() == SpaceTypeEnum.PRIVATE.getValue()) {
+    // 私有空间分支（本次不走）
+} else {
+    // ★ 团队空间：按 (userId, spaceId) 查当前用户的成员记录
+    spaceUser = spaceUserService.lambdaQuery()
+            .eq(SpaceUser::getUserId, userId)
+            .eq(SpaceUser::getSpaceId, spaceId)
+            .one();
+    if (spaceUser == null) return new ArrayList<>();   // 不是成员 → 拒
+    return spaceUserAuthManager.getPermissionsByRole(spaceUser.getSpaceRole());  // ← 第 5 步
+}
+```
+
+这一步查 `space_user` 表，拿到 `spaceUser.getSpaceRole()`（editor 的是 `"editor"`，admin 的是 `"admin"`），交给第 5 步转成权限码列表。
+
+### 第 5 步｜`getPermissionsByRole`：角色 → 权限码（读 json）
+
+📦 `SpaceUserAuthManager.java:49-62`
+
+```java
+public List<String> getPermissionsByRole(String spaceUserRole) {
+    if (StrUtil.isBlank(spaceUserRole)) return new ArrayList<>();
+    SpaceUserRole role = SPACE_USER_AUTH_CONFIG.getRoles().stream()
+            .filter(r -> spaceUserRole.equals(r.getKey()))   // 按角色 key 匹配
+            .findFirst().orElse(null);
+    if (role == null) return new ArrayList<>();
+    return role.getPermissions();                           // 返回该角色的权限码数组
+}
+```
+
+`SPACE_USER_AUTH_CONFIG` 是启动时 `static` 块从 json 读进内存的（`:40-44`），运行时纯内存匹配。
+
+📦 `spaceUserAuthConfig.json`（角色 → 权限码映射，注意 `batchEdit` 只在 admin）
+
+```json
+{ "key": "editor", "permissions": ["picture:view","picture:upload","picture:edit","picture:delete"] },
+{ "key": "admin",  "permissions": ["spaceUser:manage","picture:view","picture:upload",
+                                  "picture:edit","picture:delete","picture:batchEdit"] }
+```
+
+所以：
+
+- editor 查 → 返回 `[view, upload, edit, delete]`
+- admin 查 → 返回 `[manage, view, upload, edit, delete, batchEdit]`
+
+> ⚠️ 别搞混：`SpaceUserAuthManager` 里那个 `getPermissionList(Space, User)` 重载（`:69`）**不在注解链路上**——它是给图片详情接口算"显隐按钮用的 permissionList"的；注解链路里 `SpaceUserAuthManager` 只以 `getPermissionsByRole` 的身份被 `StpInterfaceImpl` 调用。两个 `getPermissionList` 名字一样但职责不同（详见上一篇 permissionList 显隐回归）。
+
+### 第 6 步｜回到框架：`contains` 匹配，一锤定音
+
+🔧 回到第 3 步的 `checkPermission`：
+
+```java
+list.contains("picture:batchEdit") ?
+```
+
+- editor 的 list = `[view, upload, edit, delete]` → **不含** → 抛 `NotPermissionException("picture:batchEdit", "space")`
+- admin 的 list 含 `picture:batchEdit` → **通过** → 拦截器放行 → 进入 `batchEditPictureMetadata` 方法体执行业务
+
+### 第 7 步｜被拒时：异常怎么变成前端看到的"无权限"
+
+editor 被抛了 `NotPermissionException`，这个异常在 `GlobalExceptionHandler` 被接住：
+
+📦 `GlobalExceptionHandler.java:45-49`
+
+```java
+@ExceptionHandler(NotPermissionException.class)
+public BaseResponse<?> notPermissionExceptionHandler(NotPermissionException e) {
+    log.error("NotPermissionException", e);
+    return ResultUtils.error(ErrorCode.NO_AUTH_ERROR, e.getMessage());   // 统一返回"无权限"
+}
+```
+
+返回 `{ code: <NO_AUTH_ERROR>, message: "无权限" }` 给前端，前端 axios 拿到非 0 的 code → 弹"无权限"提示。**全程 Controller 方法体一行没执行**——这就是"权限不通过时业务代码碰都不碰"。
+
+### editor vs admin 全链路对照（同一次 `/edit/batch/metadata` 请求）
+
+| 步 | 代码位置 | editor | admin |
+|---|---|---|---|
+| 0 | `request.ts` / `pictureController.ts` | 发请求，body 带 spaceId + cookie | 同 |
+| 1 | `SaTokenConfigure:20` | SaInterceptor 拦下 | 同 |
+| 2 | `SaTokenConfigure:28` + 注解 | 合并成 `@SaCheckPermission(space, "picture:batchEdit")` | 同 |
+| 3 | `StpLogic.checkPermission` | 调 `getPermissionList` | 同 |
+| 4 | `StpInterfaceImpl:166` 查 SpaceUser | spaceRole = `"editor"` | spaceRole = `"admin"` |
+| 5 | `SpaceUserAuthManager:49` + json | 返回 `[view,upload,edit,delete]` | 返回 `[...,batchEdit]` |
+| 6 | `checkPermission.contains` | 不含 → 抛 `NotPermissionException` | 含 → 放行 |
+| 7 | `GlobalExceptionHandler:45` | 转 `NO_AUTH_ERROR` 返回前端 | （不触发）进入方法体 |
+
+### 一句话总结
+
+> **一次 `/edit/batch/metadata` 请求的权限判定，依次经过：前端 `request.ts` 的 `withCredentials` 带 cookie → `SaTokenConfigure:20` 的 SaInterceptor 拦截 → `:28` 把 `@SaSpaceCheckPermission` 穿透合并成 `@SaCheckPermission(space, "picture:batchEdit")` → 框架 `StpLogic.checkPermission` 调你的 `StpInterfaceImpl.getPermissionList` → `:166` 按 (userId, spaceId) 查 `space_user` 拿角色 → `SpaceUserAuthManager.getPermissionsByRole:49` 读 json 转权限码 → 框架 `contains("picture:batchEdit")` → editor 不含抛 `NotPermissionException`，被 `GlobalExceptionHandler:45` 接住返回"无权限"；admin 含则放行进方法体。editor 和 admin 的全部差别，就是 json 里 `picture:batchEdit` 配给了谁。**
+
