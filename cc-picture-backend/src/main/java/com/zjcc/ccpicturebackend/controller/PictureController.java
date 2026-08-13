@@ -436,7 +436,7 @@ public class PictureController {
      * @return
      */
     @PostMapping("/edit/batch")
-    @SaSpaceCheckPermission(value = SpaceUserPermissionConstant.PICTURE_EDIT)
+    @SaSpaceCheckPermission(value = SpaceUserPermissionConstant.PICTURE_BATCH_EDIT)
     public BaseResponse<Boolean> editPictureByBatch(@RequestBody PictureEditByBatchRequest pictureEditByBatchRequest, HttpServletRequest request) {
         ThrowUtils.throwIf(pictureEditByBatchRequest == null, ErrorCode.PARAMS_ERROR);
         User loginUser = userService.getLoginUser(request);
@@ -450,6 +450,7 @@ public class PictureController {
      * @param request
      * @return
      */
+    @SaSpaceCheckPermission(value = SpaceUserPermissionConstant.PICTURE_BATCH_EDIT)
     @PostMapping("/edit/batch/metadata")
     public BaseResponse<BatchEditResult> batchEditPictureMetadata(@RequestBody PictureEditByBatchRequest req,
                                                               HttpServletRequest request) {

@@ -98,11 +98,8 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         if (spaceId != null) {
             Space oldSpace = spaceService.getById(spaceId);
             ThrowUtils.throwIf(oldSpace == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
-            // 必须空间创建人(或管理员)才能修改
-            // 现阶段空间的管理员就是空间的创建人,后续会增加团队空间概念
-            if (!loginUser.getId().equals(oldSpace.getUserId())) {
-                throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "没有空间权限");
-            }
+            // 权限由 Controller 层 @SaSpaceCheckPermission(PICTURE_UPLOAD) 统一校验
+            // （团队空间按 SpaceUser 角色、私有空间按本人/系统管理员，均由 Sa-Token 完成）
             // v4.0 校验额度
             ThrowUtils.throwIf(oldSpace.getTotalCount() >= oldSpace.getMaxCount(),
                     ErrorCode.OPERATION_ERROR, "空间条数不足");
@@ -128,10 +125,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             // v2.0
             oldPicture = this.getById(pictureId);
             ThrowUtils.throwIf(oldPicture == null, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
-            // 仅上传者本人或管理员可编辑 权限校验逻辑
-            if (!oldPicture.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
-                throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
-            }
+            // 权限由 Controller 层 @SaSpaceCheckPermission(PICTURE_UPLOAD) 统一校验，此处不再重复判断
             // v3.0
             // 更新图片，需要校验更新时传递的 spaceId 和已有图片的 spaceId 是否一致。
             // 没传 spaceId，则复用原有图片的 spaceId
@@ -614,7 +608,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 2 校验空间权限
         Space space = spaceService.getById(spaceId);
         ThrowUtils.throwIf(space == null,ErrorCode.PARAMS_ERROR,"空间不存在");
-        ThrowUtils.throwIf(!space.getUserId().equals(loginUser.getId()),ErrorCode.NO_AUTH_ERROR,"没有空间访问权限");
+        // 权限由 Controller 层 @SaSpaceCheckPermission(PICTURE_VIEW) 统一校验
         // 3 查询该空间下所有图片（必须有主色调）
         List<Picture> pictureList = this.lambdaQuery().eq(Picture::getSpaceId, spaceId)
                 .isNotNull(Picture::getPicColor)// 非 null
@@ -697,7 +691,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 2 校验空间权限
         Space space = spaceService.getById(spaceId);
         ThrowUtils.throwIf(space == null, ErrorCode.NOT_FOUND_ERROR, "空间不存在");
-        ThrowUtils.throwIf(!space.getUserId().equals(loginUser.getId()), ErrorCode.NO_AUTH_ERROR, "没有空间访问权限");
+        // 权限由 Controller 层 @SaSpaceCheckPermission(PICTURE_EDIT) 统一校验
         return pictureIdList;
     }
 

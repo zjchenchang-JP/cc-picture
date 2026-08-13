@@ -28,4 +28,9 @@ public interface SpaceUserPermissionConstant {
      * 图片删除权限
      */
     String PICTURE_DELETE = "picture:delete";
+
+    /**
+     * 图片批量编辑权限（仅空间管理员拥有，用于大数据量批量修改等高危操作）
+     */
+    String PICTURE_BATCH_EDIT = "picture:batchEdit";
 }
