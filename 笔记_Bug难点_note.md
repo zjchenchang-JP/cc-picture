@@ -2772,3 +2772,392 @@ watch(() => props.id, () => {
 
 > **一句话：从 `/space/A` 点到 `/space/B`，Vue Router 复用同一个 `SpaceDetailPage` 实例、不重新挂载，`onMounted` 不再触发 → `fetchData()` 不执行 → 图片还是上个空间的；「先点空间管理」是因为跳到了别的组件、让 `SpaceDetailPage` 卸载重建、onMounted 重新触发才好的。修复用 `watch(props.id)` 在 id 变化时重置搜索条件 + 重新加载。**
 
+---
+
+# 2026/08/12
+
+## 额度重复累加的真实触发：picture 表 2 条、space.totalCount 却是 4
+
+### 现象
+
+某团队空间（`spaceId = 2087090344638144514`）下，`picture` 表只有 **2 条**记录，但 `space` 表同一空间的 `totalCount` 却是 **4**，`totalSize` 是 **49860**。明明就 2 张图，空间条数凭什么翻倍？
+
+第一反应的疑问是：「totalCount 是不是腾讯云 COS 返回的统计数据？」
+
+---
+
+### 先破一个误解：totalCount 不是云厂商的数据
+
+**totalCount 是项目自己维护的本地数据库字段，跟腾讯云 COS 没有任何关系。**
+
+- COS 只负责存文件（图片 URL 指向 `cos.ap-shanghai.myqcloud.com`），它不给你统计「这个空间有几张图」。
+- `space.totalCount` 是后端代码用 SQL 手动累加出来的，写死在 `PictureServiceImpl` 的上传 / 删除事务里：
+
+```java
+// 上传时（:212）
+.setSql("totalCount = totalCount + 1")
+// 删除时（:554）
+.setSql("totalCount = totalCount - 1")
+```
+
+所以「totalCount 对不上」=「这两段累加逻辑被错误触发过」，不是「云厂商统计错了」。排查方向从一开始就该锁定在**本地这段 +1 / -1 的调用时机**，而不是去查 COS。
+
+---
+
+### 数据反推：用 totalSize 交叉验证，锁死「替换图片时多加了一次」
+
+光看 `totalCount = 4`（比实际多 2）只能猜「多了 2 次无效累加」，但**怎么证明**是「替换图片」触发的？靠 `totalSize` 交叉验证。
+
+把两条 picture 的真实大小加起来：
+
+```
+图 A picSize = 11962
+图 B picSize = 13010
+真实总和    = 24972
+```
+
+而 `space.totalSize = 49860 ≈ 24972 × 2`（精确 2 倍是 49944，差 84 字节是两次重新上传时 webp 重压的波动）。
+
+**totalSize 也几乎正好翻倍** → 每张图都被「额外计了一次大小」，和 totalCount 多 2 完全自洽。
+
+进一步推：每次「替换图片」会 `+新大小` 但**不 `-旧大小`**：
+
+```
+初始上传 2 张：           totalSize = A + B
+替换图 A（新大小 A'）：    totalSize = A + B + A'
+替换图 B（新大小 B'）：    totalSize = A + B + A' + B' = 49860
+→ A + B = 49860 - A' - B' = 49860 - 11962 - 13010 = 24888
+```
+
+初始两张大小之和约 24888，和现在的 24972 几乎相等（差 84，webp 波动）。**两条数据相互印证：这个空间里的 2 张图，每张都被「重新上传替换」过 1 次**，于是：
+
+- `picture` 表：2 条（替换不新增行，`saveOrUpdate` 走 update）
+- `space.totalCount`：2（初始）+ 2（两次替换各 +1）= **4** ✅
+- `space.totalSize`：初始 + 两次替换叠加 ≈ **2 倍** ✅
+
+> 教训：**排查「计数字段对不上」，别只盯着出问题的那一个字段，找另一个同源的累加字段（这里 totalSize 和 totalCount 同在上传事务里累加）做交叉验证**——如果它也按相同倍数偏了，根因就锁死了；如果没偏，说明是另一条路径（比如某个只动 count 不动 size 的分支）。一个字段是孤证，两个字段同向偏移才是铁证。
+
+---
+
+### 根因：正是 2026/06/24 分析过的 Bug②「替换图片时无脑 +1」
+
+这正是 2026/06/24 那节「uploadPicture 更新图片的三个 Bug」里 **Bug② 额度重复累加** 的真实触发——当时是理论推演（「更新一次多算 1 张 + 旧大小」），这次是真实数据踩中了。
+
+原始代码（`:204-217`，事务里**不区分新增 / 更新，永远做加法**）：
+
+```java
+transactionTemplate.execute(status -> {
+    boolean result = this.saveOrUpdate(picture);   // pictureId 有值时走 update，picture 行不新增
+    ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR, "图片上传失败");
+    if (finalSpaceId != null) {
+        boolean update = spaceService.lambdaUpdate().eq(Space::getId, finalSpaceId)
+                .setSql("totalSize = totalSize + " + picture.getPicSize())  // ← 永远 +新大小
+                .setSql("totalCount = totalCount + 1")                       // ← 永远 +1
+                .update();
+        ThrowUtils.throwIf(!update, ErrorCode.OPERATION_ERROR, "额度更新失败");
+    }
+    return null;
+});
+```
+
+更新（`pictureId != null`，「原地换图」）时，`picture` 表记录数不变，但 `totalSize += 新大小`、`totalCount += 1` 照样执行 → 重复累加。换的图越大、换得越多次，额度越虚高。
+
+---
+
+### 修复：更新走「差额 + 条数不变」
+
+更新的本质是「原地替换文件」，对额度的影响**只有大小的变化、条数不变**。所以：
+
+1. 把 `oldPicture` 从 `if (pictureId != null)` 块内**提到方法外层**（事务 lambda 里要拿到它算差额，原作用域拿不到——这点 2026/06/24 的笔记也强调过）。
+2. 事务里按场景分支：更新只调大小差额、条数不动；新增才加大小 + 加条数。
+
+```java
+// ① oldPicture 提到外层声明（原在 if 块内，事务里拿不到）
+Picture oldPicture = null;
+if (pictureId != null) {
+    ...
+    oldPicture = this.getById(pictureId);   // 原来是 Picture oldPicture = ...（块级，外面看不见）
+    ...
+}
+
+// ② 事务里按场景分支
+Long finalSpaceId = spaceId;
+final Picture finalOldPicture = oldPicture;   // lambda 引用要 final
+transactionTemplate.execute(status -> {
+    boolean result = this.saveOrUpdate(picture);
+    ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR, "图片上传失败");
+    if (finalSpaceId != null) {
+        boolean update;
+        if (finalOldPicture != null) {
+            // 更新（替换文件）：条数不变，只按"新大小 - 旧大小"的差额调整 totalSize
+            long delta = picture.getPicSize() - finalOldPicture.getPicSize();
+            update = spaceService.lambdaUpdate().eq(Space::getId, finalSpaceId)
+                    .setSql("totalSize = totalSize + (" + delta + ")")
+                    .update();
+        } else {
+            // 新增图片：大小累加 + 条数 +1
+            update = spaceService.lambdaUpdate().eq(Space::getId, finalSpaceId)
+                    .setSql("totalSize = totalSize + " + picture.getPicSize())
+                    .setSql("totalCount = totalCount + 1")
+                    .update();
+        }
+        ThrowUtils.throwIf(!update, ErrorCode.OPERATION_ERROR, "额度更新失败");
+    }
+    return null;
+});
+```
+
+两个细节：
+
+- **`delta` 可正可负**：换成更大的图 `delta > 0`（totalSize 增加）；换成更小的图 `delta < 0`（totalSize 减少）。SQL 里写成 `totalSize + (delta)`，负数自带减法，不用单独写 `totalSize - |delta|`。
+- **`finalOldPicture` 必须 final**：`oldPicture` 先 `= null` 后在 if 里赋值，不是 effectively final，lambda 引用会编译报错；用一个 final 引用接住它即可。
+
+---
+
+### 脏数据修复（本次手动改的，记录方法）
+
+光改代码不够，之前被算错的 `space` 表数据要回填成真实值。最稳的是用 `picture` 表的真实聚合反查：
+
+```sql
+UPDATE space s
+JOIN (
+    SELECT spaceId, COUNT(*) AS cnt, COALESCE(SUM(picSize), 0) AS sz
+    FROM picture GROUP BY spaceId
+) p ON p.spaceId = s.id
+SET s.totalCount = p.cnt, s.totalSize = p.sz
+WHERE s.id = 2087090344638144514;
+```
+
+（这一次是手动修的；以后若再发现大规模不一致，可去掉 `WHERE` 全量对齐，或做成定时校准任务。）
+
+---
+
+### 经验教训
+
+1. **业务统计字段（totalCount / totalSize）几乎都是代码手动累加的，不是云厂商 / 数据库自动给的**——排查「统计对不上」，先找代码里所有 `+1 / -1` 的地方、看调用时机对不对，别去查外部服务。
+2. **「计数字段对不上」要找同源字段交叉验证**——totalSize 和 totalCount 在同一个事务里累加，一个偏了看另一个是不是同倍数偏；两个都偏 = 累加时机错了（本案），只偏一个 = 另有独立分支。孤证容易误判。
+3. **从「数据倍数」反推「触发次数」是高效的定位手段**——totalCount 多 2、totalSize 约 2 倍，直接推出「2 张图各被替换过 1 次」，比翻日志快。
+4. **替换型操作（原地换文件 / 换内容）的副作用必须按「差额」算，不能当新增**——条数不变、大小按 `新 - 旧` 调。这点 2026/06/24 的分析讲过，这次是真实数据验证了它确实会踩。
+5. **理论分析要及时落地成代码**——2026/06/24 已经把 Bug② 的根因和修法写清楚了，但代码没及时改，之后真实数据就踩中了。**分析出 bug 不等于修了 bug**，发现就改。
+
+> **一句话：picture 表 2 条图、space.totalCount 却是 4，根因不是腾讯云统计（totalCount 是本地代码 `totalCount + 1` 累加的），而是 2026/06/24 分析过的 Bug② 真实触发——「替换图片」时也走 `totalCount + 1 / totalSize + 新大小` 的加法；用 totalSize 也约翻倍做交叉验证锁死了根因。修复：oldPicture 提外层 + 事务按场景分支，更新只调大小差额、条数不变，脏数据用 picture 表聚合回填。**
+
+---
+
+# 2026/08/12
+
+## 公共图库本人图片，详情页"编辑/删除"按钮消失：两条 getPermissionList 口径不一致
+
+### 现象
+
+把前端 `PictureDetailPage.vue` 的权限控制从「注释掉的 `canEdit` 函数」换成「看后端返回的 `picture.permissionList`」后，出现一个回归：**公共图库里我自己上传的图，详情页的"编辑/删除"按钮不见了**（`canEdit` / `canDelete` 算出来是 false）。而旧逻辑下，本人是能看到按钮的。
+
+第一反应怀疑"新逻辑是不是不校验登录、不校验本人了"——**这个方向错了**。新逻辑并没有丢掉这些校验，只是把它们搬到了后端；真正的回归点在别处。
+
+---
+
+### 先厘清：新旧前端逻辑差在哪
+
+**旧逻辑（已注释，`PictureDetailPage.vue:149-158`）——前端自己判：**
+
+```ts
+const canEdit = computed(() => {
+  const loginUser = loginUserStore.loginUser
+  if (!loginUser) return false                       // 未登录
+  const user = picture.value.user ?? {}
+  return loginUser.id === user.id || loginUser.userRole === 'admin'   // 本人 或 管理员
+})
+```
+
+**新逻辑（`PictureDetailPage.vue:230-238`）——只看后端给的权限码：**
+
+```ts
+function createPermissionChecker(permission: string) {
+  return computed(() => {
+    return (picture.value.permissionList ?? []).includes(permission)
+  })
+}
+const canEdit = createPermissionChecker(SPACE_PERMISSION_ENUM.PICTURE_EDIT)    // "picture:edit"
+const canDelete = createPermissionChecker(SPACE_PERMISSION_ENUM.PICTURE_DELETE) // "picture:delete"
+```
+
+新逻辑把"谁能编辑/删除"的判断**完全交给后端**：后端算好一个权限码列表 `permissionList` 塞进 `PictureVO` 返回，前端只检查列表里**含不含**对应的操作码。这个设计方向是对的（权限规则集中后端，前端只管显隐），但前提是**后端那张列表算得对**——回归就出在后端算错了。
+
+---
+
+### permissionList 是什么、从哪来
+
+`permissionList` 不是图片的固有属性，而是后端针对「**当前登录用户 × 这张图所在空间**」实时算出来的权限码列表（如 `["picture:view","picture:edit","picture:delete"]`）。它由后端在「图片详情」接口里算好、塞进 `PictureVO` 返回。所以问题要顺着**请求链路**去后端找。
+
+---
+
+### 触发该权限校验的两条请求链路（重点）
+
+同一个"权限码"，在项目里有**两条独立的计算路径**，分别服务两个场景。理解这两条链路，才能看清回归点。
+
+#### 链路一：详情页按钮显隐（读 permissionList）
+
+```
+进入 PictureDetailPage (onMounted)
+  │  fetchPictureDetail()
+  ▼
+getPictureVoByIdUsingGet({ id })            ← 前端 api 调用
+  │
+  ▼  HTTP
+GET /api/picture/get/vo?id=xxx
+  │
+  ▼
+PictureController.getPictureVOById          (PictureController.java:180)
+  ├─ picture = pictureService.getById(id)
+  ├─ spaceId = picture.getSpaceId()
+  │   └─ spaceId == null（公共图库）→ space = null
+  │   └─ spaceId != null → 校验 PICTURE_VIEW + space = getById(spaceId)
+  ├─ loginUser = userService.getLoginUser(request)
+  │
+  ├─ ★ permissionList = spaceUserAuthManager.getPermissionList(space, loginUser, picture)
+  │                   └──（修复前是 getPermissionList(space, loginUser)，没有 picture 参数）
+  └─ pictureVO.setPermissionList(permissionList)
+  │
+  ▼  返回给前端
+picture.permissionList
+  │
+  ▼
+canEdit   = permissionList.includes("picture:edit")     → v-if="canEdit"   控制编辑按钮
+canDelete = permissionList.includes("picture:delete")   → v-if="canDelete" 控制删除按钮
+```
+
+**关键**：这条链路用的是 **`SpaceUserAuthManager.getPermissionList`**，它的入参是 `(space, loginUser)`（修复前），**没有 picture**。
+
+#### 链路二：点删除/编辑时，接口的 Sa-Token 注解鉴权（真正放行/拒绝）
+
+```
+点"删除" → doDelete → deletePictureUsingPost({ id })
+  │
+  ▼  HTTP
+POST /api/picture/delete
+  │
+  ▼
+SaInterceptor.preHandle 拦截（SaTokenConfigure 注册，拦 /**）
+  │
+  ▼  找注解（AnnotatedElementUtils.getMergedAnnotation 穿透组合注解）
+@SaSpaceCheckPermission(PICTURE_DELETE)  → 合并成 @SaCheckPermission(type=SPACE, value="picture:delete")
+  │
+  ▼  按 type=SPACE 路由，要校验"SPACE 体系下有无 picture:delete"
+StpInterfaceImpl.getPermissionList(loginId, "space")    ← 注意是另一个类的方法
+  ├─ getAuthContextByRequest()：路径前缀是 picture → setPictureId(id)
+  ├─ 拿到 pictureId → pictureService 反查 picture → spaceId = picture.getSpaceId()
+  │
+  ├─ ★ 公共图库（spaceId == null）：
+  │     picture.getUserId().equals(userId) || userService.isAdmin(loginUser)
+  │       → 是 → return ADMIN_PERMISSIONS（含 picture:delete）
+  │       → 否 → return [PICTURE_VIEW]（只读，不含 picture:delete）
+  ▼
+Sa-Token 内部：返回列表 .contains("picture:delete") ?
+   含 → 放行进 deletePicture 方法体
+   不含 → 抛 NotPermissionException → 全局异常 → 返回"无权限"
+```
+
+**关键**：这条链路用的是 **`StpInterfaceImpl.getPermissionList`**，它能从请求里拿到 `pictureId`、反查到 `picture.getUserId()`，**所以能判断"是不是本人上传的图"**。
+
+---
+
+### 回归点：两个 getPermissionList 对「公共图库 + 本人」的判断不一致
+
+把两条路径的公共图库分支并排看，差异一目了然：
+
+| 路径 | 所在类 | 服务场景 | 公共图库 + 本人上传者 | 公共图库 + 管理员 | 公共图库 + 他人 |
+|---|---|---|---|---|---|
+| **A** | `SpaceUserAuthManager` | 详情页按钮显隐 | ❌ 返回空（**本人也拿不到权限**）| ✅ 全权限 | ❌ 空 |
+| **B** | `StpInterfaceImpl` | 删除/编辑接口鉴权 | ✅ 全权限（本人放行）| ✅ 全权限 | 只读 `[PICTURE_VIEW]` |
+
+A 的公共图库分支（`SpaceUserAuthManager.java`，修复前）：
+
+```java
+if (space == null) {                          // 公共图库
+    if (userService.isAdmin(loginUser)) return ADMIN_PERMISSION;
+    return new ArrayList<>();                 // ← 本人上传者也掉进这里，权限列表为空
+}
+```
+
+B 的公共图库分支（`StpInterfaceImpl.java:140-148`）：
+
+```java
+if (spaceId == null) {                        // 公共图库
+    if (picture.getUserId().equals(userId) || userService.isAdmin(loginUser))
+        return ADMIN_PERMISSIONS;             // 本人 或 管理员 → 全权限
+    return Collections.singletonList(PICTURE_VIEW);  // 他人 → 只读
+}
+```
+
+**后果**：本人上传的公共图库图片，走路径 B（直接调删除/编辑接口）后端**允许**操作；但走路径 A（详情页）`permissionList` 是空的，前端 `canEdit`/`canDelete` = false → **按钮不显示**。出现了"接口允许、按钮却没显示"的割裂——这是 UX 回归，**不是安全漏洞**（按钮显隐从来不是安全边界，真鉴权在路径 B）。
+
+---
+
+### 根因：SpaceUserAuthManager.getPermissionList 的入参没有 picture
+
+为什么路径 A 判不了"本人"？因为它的方法签名是 `getPermissionList(Space space, User loginUser)`，**入参只有 space 和 user，没有 picture**。公共图库下 `space == null`，它无从知道"当前这张图是不是你上传的"，只能一刀切只认管理员。
+
+而路径 B 能判，是因为 `StpInterfaceImpl` 是 Sa-Token 的权限加载器，它能从 HTTP 请求里解析出 `pictureId`，再反查出 `picture.getUserId()`——**两条路径手里拿到的信息量不一样，结果就对不上**。
+
+---
+
+### 修复：给 Manager 加带 picture 的重载
+
+思路：把权限计算的上下文补全，让路径 A 也能感知 picture；同时不破坏现有调用点。
+
+**① `SpaceUserAuthManager` 新增带 `picture` 的重载，公共图库分支补上本人判断：**
+
+```java
+// 老方法保留：委托新方法，picture 传 null（行为不变，兼容空间详情 / WebSocket 等调用点）
+public List<String> getPermissionList(Space space, User loginUser) {
+    return getPermissionList(space, loginUser, null);
+}
+
+// 新重载：图片详情页用，公共图库下能判断"本人上传者"
+public List<String> getPermissionList(Space space, User loginUser, Picture picture) {
+    if (loginUser == null) return new ArrayList<>();
+    List<String> ADMIN_PERMISSION = getPermissionsByRole(SpaceRoleEnum.ADMIN.getValue());
+    if (space == null) {
+        // ★ 管理员 或 上传者本人 拥有全部权限（与 StpInterfaceImpl 公共图库分支口径一致）
+        boolean isOwner = picture != null && loginUser.getId().equals(picture.getUserId());
+        if (userService.isAdmin(loginUser) || isOwner) return ADMIN_PERMISSION;
+        return new ArrayList<>();
+    }
+    // ... 私有 / 团队空间分支不变
+}
+```
+
+**② `PictureController.getPictureVOById` 改调新重载，把 picture 传进去：**
+
+```java
+List<String> permissionList = spaceUserAuthManager.getPermissionList(space, loginUser, picture);
+```
+
+修复后三条路径口径一致：
+
+| 场景 | 详情页按钮（修复后） | 删除/编辑接口（路径 B） |
+|---|---|---|
+| 公共图库 + 本人 | ✅ 显示 | ✅ 允许 |
+| 公共图库 + 管理员 | ✅ 显示 | ✅ 允许 |
+| 公共图库 + 他人 | ❌ 不显示 | ❌ 拒绝（只读）|
+
+`SpaceServiceImpl`（空间详情）和 `WsHandshakeInterceptor`（WebSocket 握手）仍调老的 `(space, loginUser)` 重载，picture=null，行为完全不变——零副作用。
+
+---
+
+### 为什么改后端 Manager，而不是改前端
+
+也可以在前端 `canEdit` 里再 OR 一段"本人或管理员"，但那是**把权限规则又散回前端**，和"后端统一权限"的设计初衷冲突——以后团队空间规则一变，前后端又得各改一次，且容易再次出现口径不一致。改后端 Manager，权限规则集中一处，前端照旧只看 `permissionList`，最干净。
+
+---
+
+### 经验教训
+
+1. **同一个权限语义（"公共图库本人可改"）在多处实现时，必须保证口径一致**——否则会出现"按钮不显示但接口允许"或反过来的割裂。本项目里 `SpaceUserAuthManager`（算显隐用的列表）和 `StpInterfaceImpl`（接口鉴权用的列表）是两个地方，改了一处要顺着查另一处同不同步。
+2. **后端"统一返回 permissionList"是好的设计，但算列表的方法入参要够用**——`getPermissionList(space, loginUser)` 判不了公共图库的"本人"，因为入参没 picture；设计 API 时要想清楚"这个判断需要哪些上下文"。
+3. **前端按钮显隐只是 UX，不是安全边界**——真正的鉴权在后端接口（Sa-Token 注解）。所以"该显示的按钮没显示"是体验回归，不是漏洞；反过来"不该显示的显示了"才是危险信号（但那种也会被后端接口挡住）。
+4. **扩展权限上下文用「加重载 + 老方法委托」是无侵入手法**——老调用点传 null 保持原行为，新场景传新参数拿到更精细的判定，不用改老方法的签名、不影响现有调用方。
+5. **权限回归要顺着请求链路找，别停在"前端逻辑变了"**——新逻辑只是把判断挪到后端，真正出错的地方在后端算 `permissionList` 的那段。先画清链路一（显隐）和链路二（鉴权），差异点自己就冒出来了。
+
+> **一句话：详情页改用 `permissionList` 控制按钮显隐后，公共图库本人图片的编辑/删除按钮消失——根因不是"新逻辑不校验登录/本人"，而是算显隐列表的 `SpaceUserAuthManager.getPermissionList(space, loginUser)` 入参没有 picture，公共图库下一刀切只认管理员；而真正鉴权的 `StpInterfaceImpl` 能拿 pictureId 反查、判得了本人，于是出现"接口允许、按钮不显示"的割裂。修复：给 Manager 加带 picture 的重载，公共图库分支补上"本人上传者"，Controller 改调新重载；老调用点传 null 不受影响。这是 UX 回归（前端按钮显隐不是安全边界），不是漏洞。**
+
